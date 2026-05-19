@@ -41,6 +41,7 @@ export type WsMessageType =
   | 'status'
   | 'error'
   | 'pong'
+  | 'tts_fallback'
 
 // Discriminated union — each WS event has a well-typed payload so the handler
 // can rely on field presence without optional-chaining everywhere.
@@ -54,6 +55,7 @@ export type WsMessage =
   | { type: 'status'; message: string; stage?: string }
   | { type: 'error'; message: string }
   | { type: 'pong' }
+  | { type: 'tts_fallback'; engine: string; voice_cloned: boolean; message: string }
 
 export interface VoiceApiResponse {
   id: string

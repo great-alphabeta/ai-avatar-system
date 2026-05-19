@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Clock, MessageCircle, Trash2, Play, RefreshCw, Search, Loader2,
-  Download, Pencil, Check, X,
+  Download, Pencil, Check, X, Sparkles,
 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
@@ -19,6 +19,7 @@ interface ConversationSummary {
   id: string
   session_id: string
   title: string | null
+  summary?: string | null
   message_count: number
   created_at: string
 }
@@ -56,6 +57,7 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
   const [renameTarget, setRenameTarget] = useState<{ convId: string; sessionId: string } | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
+  const [summarizingId, setSummarizingId] = useState<string | null>(null)
 
   const { data: sessions, isLoading, refetch } = useQuery<SessionSummary[]>({
     queryKey: ['sessions'],
@@ -152,6 +154,19 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
       toast.error('Could not export conversation')
     } finally {
       setBusy(null)
+    }
+  }
+
+  const handleSummarize = async (convId: string) => {
+    setSummarizingId(convId)
+    try {
+      await api.summarizeConversation(convId)
+      toast.success('Summary generated', { icon: '✨' })
+      queryClient.invalidateQueries({ queryKey: ['conversations'] })
+    } catch {
+      toast.error('Could not summarize — backend or LLM unavailable')
+    } finally {
+      setSummarizingId(null)
     }
   }
 
@@ -316,6 +331,17 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                         <Pencil size={13} />
                       </button>
                     )}
+                    {convo && !isRenaming && (
+                      <button
+                        onClick={() => handleSummarize(convo.id)}
+                        className="btn-icon"
+                        title={convo.summary ? 'Regenerate AI summary' : 'Generate AI summary'}
+                        aria-label="Summarize conversation with AI"
+                        disabled={summarizingId === convo.id}
+                      >
+                        {summarizingId === convo.id ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                      </button>
+                    )}
                     <button
                       onClick={() => handleExport(s.id)}
                       className="btn-icon"
@@ -356,8 +382,20 @@ export function HistoryPanel({ onResume }: HistoryPanelProps) {
                   </div>
                 </div>
 
+                {convo?.summary && !isExpanded && (
+                  <div className="border-t border-white/8 px-5 py-3 bg-primary-500/5 flex items-start gap-2">
+                    <Sparkles size={12} className="text-primary-400 mt-0.5 flex-shrink-0" />
+                    <p className="text-xs text-gray-300 leading-relaxed">{convo.summary}</p>
+                  </div>
+                )}
                 {isExpanded && (
                   <div className="border-t border-white/8 px-5 py-4 bg-surface-800/40">
+                    {convo?.summary && (
+                      <div className="mb-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-primary-500/10 border border-primary-500/20">
+                        <Sparkles size={12} className="text-primary-400 mt-0.5 flex-shrink-0" />
+                        <p className="text-xs text-gray-300 leading-relaxed">{convo.summary}</p>
+                      </div>
+                    )}
                     {!msgs ? (
                       <p className="text-sm text-gray-500">Loading…</p>
                     ) : msgs.length === 0 ? (

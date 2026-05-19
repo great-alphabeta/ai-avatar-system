@@ -233,9 +233,26 @@ export const api = {
     return response.data
   },
 
+  summarizeConversation: async (conversationId: string) => {
+    const response = await apiClient.post(`/api/v1/conversations/${conversationId}/summarize`)
+    return response.data
+  },
+
   deleteConversation: async (conversationId: string) => {
     const response = await apiClient.delete(`/api/v1/conversations/${conversationId}`)
     return response.data
+  },
+
+  synthesizeVoicePreview: async (voiceId: string, text?: string, language?: string) => {
+    const form = new FormData()
+    if (text) form.append('text', text)
+    if (language) form.append('language', language)
+    const response = await apiClient.post(
+      `/api/v1/voices/${voiceId}/synthesize`,
+      form,
+      { responseType: 'blob', headers: { 'Content-Type': 'multipart/form-data' } },
+    )
+    return response.data as Blob
   },
 
   // Health

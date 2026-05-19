@@ -5,6 +5,7 @@ import {
   Send, Mic, MicOff, Video, Loader2, Volume2, VolumeX,
   Sparkles, Clock, Copy, RotateCcw, Wand2,
   MessageCircle, Zap, Activity, Download, Globe,
+  Pencil, Trash2, Check, X, Keyboard, Plug,
 } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
@@ -28,6 +29,10 @@ interface Message {
   content: string
   timestamp: Date
   emotion?: string
+  // `persisted` means this message came back from the server (so it has a
+  // real DB id and supports edit/delete). Optimistic locally-created
+  // messages don't get the action menu until they're re-fetched.
+  persisted?: boolean
 }
 
 interface VideoChunk {
@@ -171,6 +176,18 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionIdRef = useRef<string | null>(null)
 
+  // Edit/delete state. We track by message id (the persisted DB id) so the
+  // hover menu can drive the corresponding API call.
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+
+  // Help/keyboard-shortcuts modal
+  const [showShortcuts, setShowShortcuts] = useState(false)
+
+  // True when the reconnect loop has hit MAX_WS_RECONNECT_ATTEMPTS or the
+  // backend rejected the handshake. Surfaces a "Reconnect" button in the UI.
+  const [reconnectStalled, setReconnectStalled] = useState(false)
+
   // Video playback state
   const [showVideo, setShowVideo] = useState(false)           // true while a chunk is playing
   const [currentChunkProgress, setCurrentChunkProgress] = useState({ current: 0, total: 0 })
@@ -270,6 +287,7 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
               content: m.content,
               timestamp: new Date(m.created_at),
               emotion: detectEmotion(m.content),
+              persisted: true,
             }))
           )
         }
@@ -287,6 +305,7 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
 
     websocket.onopen = () => {
       reconnectAttemptsRef.current = 0
+      setReconnectStalled(false)
       setConnectionStatus('connected')
       setWsConnected(true)
       if (wasFreshConnect) {
@@ -311,13 +330,15 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
       // session owner). No point reconnecting — surface a clear error instead.
       if (event.code === WS_AUTH_REJECT_CODE) {
         toast.error('Not authorised to join this session — please sign in again.')
+        setReconnectStalled(true)
         return
       }
 
       const sidNow = sessionIdRef.current
       if (!sidNow) return
       if (reconnectAttemptsRef.current >= MAX_WS_RECONNECT_ATTEMPTS) {
-        toast.error('Lost connection to avatar. Please refresh the page.')
+        toast.error('Lost connection to avatar.')
+        setReconnectStalled(true)
         return
       }
       const delay = Math.min(1000 * 2 ** reconnectAttemptsRef.current, 30000)
@@ -404,6 +425,13 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
         toast.error(data.message)
         setIsProcessing(false)
         setIsTyping(false)
+        break
+
+      case 'tts_fallback':
+        // Emitted once per turn when Chatterbox fails and we fell back to
+        // gTTS — voice cloning is silently lost in that case, so warn the
+        // user so they know the avatar's voice isn't what they expect.
+        toast(data.message, { icon: '⚠️', duration: 5000 })
         break
 
       case 'pong':
@@ -522,6 +550,90 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
     toast.success('Copied!', { duration: 1500 })
   }
 
+  const startEditMessage = (m: Message) => {
+    setEditingMessageId(m.id)
+    setEditDraft(m.content)
+  }
+
+  const cancelEditMessage = () => {
+    setEditingMessageId(null)
+    setEditDraft('')
+  }
+
+  const saveEditMessage = async (id: string) => {
+    const next = editDraft.trim()
+    if (!next) {
+      toast.error('Message cannot be empty')
+      return
+    }
+    // Optimistic update — revert if the backend rejects
+    const previous = messages
+    setMessages(prev => prev.map(m => m.id === id ? { ...m, content: next, emotion: detectEmotion(next) } : m))
+    setEditingMessageId(null)
+    setEditDraft('')
+    try {
+      await api.editMessage(id, next)
+      toast.success('Message updated', { duration: 1500 })
+    } catch {
+      setMessages(previous)
+      toast.error('Could not update message')
+    }
+  }
+
+  const deleteMessage = async (id: string) => {
+    if (!window.confirm('Delete this message?')) return
+    const previous = messages
+    setMessages(prev => prev.filter(m => m.id !== id))
+    try {
+      await api.deleteMessage(id)
+      toast.success('Message deleted', { duration: 1500 })
+    } catch {
+      setMessages(previous)
+      toast.error('Could not delete message')
+    }
+  }
+
+  /** Force an immediate reconnect, cancelling any pending backoff timer. */
+  const manualReconnect = useCallback(() => {
+    const sid = sessionIdRef.current
+    if (!sid) return
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
+    reconnectAttemptsRef.current = 0
+    setReconnectStalled(false)
+    setConnectionStatus('connecting')
+    connectWebSocket(sid)
+  }, [connectWebSocket])
+
+  // Global keyboard shortcuts — only active while the chat view is mounted.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // ? opens the shortcut cheat-sheet (matches GitHub / Linear convention)
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // Don't intercept when typing into an input/textarea
+        const t = e.target as HTMLElement | null
+        const tag = t?.tagName?.toLowerCase()
+        if (tag === 'input' || tag === 'textarea' || t?.isContentEditable) return
+        e.preventDefault()
+        setShowShortcuts(s => !s)
+        return
+      }
+      // Esc dismisses the modal
+      if (e.key === 'Escape' && showShortcuts) {
+        setShowShortcuts(false)
+      }
+      // Cmd/Ctrl+E toggles mute
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'e') {
+        e.preventDefault()
+        setIsMuted(m => !m)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showShortcuts])
+
   useEffect(() => {
     createSessionMutation.mutate()
     return () => {
@@ -610,6 +722,19 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
                 }`} />
                 <span className="text-gray-400 capitalize">{connectionStatus}</span>
               </div>
+              {reconnectStalled && (
+                <button
+                  onClick={manualReconnect}
+                  className="flex items-center gap-1 text-xs text-primary-300 hover:text-white
+                             px-2 py-1 rounded-md border border-primary-500/40 hover:bg-primary-500/20
+                             transition-colors"
+                  title="Reconnect"
+                  aria-label="Reconnect to avatar"
+                >
+                  <Plug size={11} />
+                  Reconnect
+                </button>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
@@ -636,11 +761,19 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
               <button
                 onClick={() => setIsMuted(m => !m)}
                 className={`btn-icon ${isMuted ? 'text-red-400 border-red-500/30' : ''}`}
-                title={isMuted ? 'Unmute' : 'Mute'}
+                title={isMuted ? 'Unmute (⌘E)' : 'Mute (⌘E)'}
                 aria-label={isMuted ? 'Unmute avatar' : 'Mute avatar'}
                 aria-pressed={isMuted}
               >
                 {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+              </button>
+              <button
+                onClick={() => setShowShortcuts(true)}
+                className="btn-icon"
+                title="Keyboard shortcuts (?)"
+                aria-label="Show keyboard shortcuts"
+              >
+                <Keyboard size={15} />
               </button>
             </div>
           </div>
@@ -729,24 +862,92 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
                     {isUser ? 'U' : 'AI'}
                   </div>
                   <div className={`max-w-[85%] group ${isUser ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
-                    <div className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed
-                      ${isUser
-                        ? 'bg-gradient-to-br from-primary-700/80 to-accent-700/60 text-white rounded-tr-sm'
-                        : 'bg-surface-700/80 border border-white/8 text-gray-200 rounded-tl-sm'
-                      }`}
-                    >
-                      {message.content}
-                      <button
-                        onClick={() => copyMessage(message.content)}
-                        className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-surface-600
-                                   border border-white/10 flex items-center justify-center
-                                   opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Copy"
-                        aria-label="Copy message"
+                    {editingMessageId === message.id ? (
+                      // Inline editor — Enter saves, Esc cancels, Shift+Enter newline
+                      <div className="w-full flex flex-col gap-1.5">
+                        <textarea
+                          autoFocus
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault()
+                              saveEditMessage(message.id)
+                            }
+                            if (e.key === 'Escape') {
+                              e.preventDefault()
+                              cancelEditMessage()
+                            }
+                          }}
+                          maxLength={8000}
+                          rows={3}
+                          className="w-full px-3 py-2 rounded-2xl bg-surface-700/80 border border-primary-500/40
+                                     text-white text-sm placeholder:text-gray-600 focus:outline-none
+                                     focus:ring-2 focus:ring-primary-500/50 resize-none"
+                          aria-label="Edit message"
+                        />
+                        <div className="flex items-center gap-1.5 justify-end">
+                          <button
+                            onClick={cancelEditMessage}
+                            className="text-xs text-gray-400 hover:text-white px-2 py-1 rounded-md hover:bg-white/5"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => saveEditMessage(message.id)}
+                            className="text-xs text-white bg-primary-600 hover:bg-primary-500 px-2.5 py-1 rounded-md
+                                       flex items-center gap-1"
+                          >
+                            <Check size={11} />
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed
+                        ${isUser
+                          ? 'bg-gradient-to-br from-primary-700/80 to-accent-700/60 text-white rounded-tr-sm'
+                          : 'bg-surface-700/80 border border-white/8 text-gray-200 rounded-tl-sm'
+                        }`}
                       >
-                        <Copy size={10} className="text-gray-400" />
-                      </button>
-                    </div>
+                        {message.content}
+                        {/* Hover action menu — only on persisted messages (have a real DB id) */}
+                        <div className={`absolute -top-2 ${isUser ? '-left-2' : '-right-2'} flex items-center gap-1
+                                         opacity-0 group-hover:opacity-100 transition-opacity`}>
+                          <button
+                            onClick={() => copyMessage(message.content)}
+                            className="w-6 h-6 rounded-full bg-surface-600 border border-white/10
+                                       flex items-center justify-center hover:bg-surface-500"
+                            title="Copy"
+                            aria-label="Copy message"
+                          >
+                            <Copy size={10} className="text-gray-400" />
+                          </button>
+                          {message.persisted && (
+                            <>
+                              <button
+                                onClick={() => startEditMessage(message)}
+                                className="w-6 h-6 rounded-full bg-surface-600 border border-white/10
+                                           flex items-center justify-center hover:bg-surface-500"
+                                title="Edit"
+                                aria-label="Edit message"
+                              >
+                                <Pencil size={10} className="text-gray-400" />
+                              </button>
+                              <button
+                                onClick={() => deleteMessage(message.id)}
+                                className="w-6 h-6 rounded-full bg-surface-600 border border-white/10
+                                           flex items-center justify-center hover:bg-red-600/30"
+                                title="Delete"
+                                aria-label="Delete message"
+                              >
+                                <Trash2 size={10} className="text-gray-400" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     <div className={`flex items-center gap-1.5 px-1 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
                       <Clock size={10} className="text-gray-600" />
                       <span className="text-xs text-gray-600">
@@ -852,10 +1053,67 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
           </div>
 
           <p className="text-xs text-gray-600 text-center mt-2">
-            Shift+Enter for new line · Mic for voice
+            Shift+Enter for new line · Mic for voice · <kbd className="px-1 py-0.5 rounded bg-surface-700 text-gray-500">?</kbd> for shortcuts
           </p>
         </div>
       </div>
+
+      {/* ── Keyboard shortcuts modal ─────────────────────────────────────── */}
+      {showShortcuts && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-surface-950/80 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="kbd-title"
+          onClick={() => setShowShortcuts(false)}
+        >
+          <div
+            className="w-full max-w-md mx-4 glass-card rounded-2xl p-6 animate-scale-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Keyboard size={18} className="text-primary-400" />
+                <h2 id="kbd-title" className="text-lg font-bold text-white">Keyboard shortcuts</h2>
+              </div>
+              <button
+                onClick={() => setShowShortcuts(false)}
+                className="btn-icon"
+                aria-label="Close shortcuts"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="divider mb-4" />
+            <ul className="space-y-2.5 text-sm">
+              {[
+                { keys: ['Enter'], desc: 'Send message' },
+                { keys: ['Shift', 'Enter'], desc: 'New line in message' },
+                { keys: ['Esc'], desc: 'Cancel editing a message' },
+                { keys: ['⌘', 'E'], desc: 'Mute / unmute avatar' },
+                { keys: ['?'], desc: 'Toggle this shortcuts panel' },
+              ].map(({ keys, desc }) => (
+                <li key={desc} className="flex items-center justify-between gap-3">
+                  <span className="text-gray-300">{desc}</span>
+                  <span className="flex items-center gap-1">
+                    {keys.map((k, i) => (
+                      <kbd
+                        key={i}
+                        className="px-2 py-0.5 rounded-md bg-surface-700 border border-white/10 text-xs text-gray-300 font-mono"
+                      >
+                        {k}
+                      </kbd>
+                    ))}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-gray-500 mt-4">
+              On Windows/Linux, use <kbd className="px-1 py-0.5 rounded bg-surface-700">Ctrl</kbd> in place of <kbd className="px-1 py-0.5 rounded bg-surface-700">⌘</kbd>.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
