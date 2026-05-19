@@ -65,7 +65,7 @@ class ConnectionManager:
     async def _load_session_data(self, session_id: str):
         try:
             from app.database import AsyncSessionLocal
-            from app.models import Session as SessionModel
+            from app.models import Session as SessionModel, Message
             from sqlalchemy import select
             from sqlalchemy.orm import joinedload
 
@@ -83,6 +83,25 @@ class ConnectionManager:
                 # Trust DB owner over caller-supplied claim
                 if session.user_id:
                     self.session_data[session_id]["user_id"] = session.user_id
+
+                # Rehydrate the LLM context window from persisted messages so
+                # a reconnect (refresh, network blip, etc.) resumes the same
+                # conversation instead of starting fresh. We pull the most
+                # recent MAX_CONTEXT_MESSAGES rows to bound memory.
+                hist_result = await db.execute(
+                    select(Message.role, Message.content)
+                    .where(Message.session_id == session_id)
+                    .where(Message.role.in_(("user", "assistant")))
+                    .order_by(Message.created_at.desc())
+                    .limit(MAX_CONTEXT_MESSAGES)
+                )
+                # Reverse to chronological order for the LLM
+                hist_rows = list(hist_result.all())[::-1]
+                if hist_rows:
+                    self.session_data[session_id]["messages"] = [
+                        {"role": row.role, "content": row.content} for row in hist_rows
+                    ]
+                    logger.info(f"Rehydrated {len(hist_rows)} message(s) for session {session_id}")
 
                 avatar = session.avatar
                 if avatar:
@@ -411,6 +430,9 @@ class ConnectionManager:
 
         chunk_index: int = 0
         sent_any = False
+        # Only warn about TTS fallback once per turn — repeated warnings on
+        # every sentence would be noisy. We reset this in the enclosing turn.
+        fallback_announced = False
 
         await self.send_message(session_id, {
             "type": "video_chunk_start",
@@ -436,12 +458,27 @@ class ConnectionManager:
                     "stage": "animation",
                 })
 
-                await tts_service.synthesize(
+                synth = await tts_service.synthesize(
                     text=sentence,
                     output_path=str(tmp_audio),
                     speaker_wav=speaker_wav,
                     language=language,
                 )
+
+                # Notify the client exactly once if Chatterbox bailed and
+                # we ended up serving the un-cloned gTTS voice instead.
+                if synth.fallback and not fallback_announced:
+                    fallback_announced = True
+                    await self.send_message(session_id, {
+                        "type": "tts_fallback",
+                        "engine": synth.engine,
+                        "voice_cloned": synth.voice_cloned,
+                        "message": (
+                            "Cloned voice unavailable — using default voice for this reply."
+                            if speaker_wav else
+                            "Voice engine fell back to gTTS for this reply."
+                        ),
+                    })
 
                 await avatar_animator.animate(
                     avatar_image_path=avatar_image,

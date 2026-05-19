@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from app.database import get_db
 from app.models import Conversation, Message, Session, User
 from app.schemas import ConversationResponse
+from app.services.llm import llm_service
 from app.api.v1.users import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,90 @@ async def rename_conversation(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to rename conversation",
+        )
+
+
+# Cap raw input length to keep the summary call cheap and within token budget.
+# At ~4 chars/token, 32 kB ≈ 8k input tokens — plenty for a chat summary.
+_SUMMARY_MAX_INPUT_CHARS = 32_000
+
+
+@router.post("/{conversation_id}/summarize", response_model=ConversationResponse)
+async def summarize_conversation(
+    conversation_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """
+    Generate a short LLM summary of the conversation and persist it to
+    `Conversation.summary`. Idempotent — calling twice just refreshes.
+    """
+    try:
+        result = await db.execute(
+            select(Conversation).where(Conversation.id == conversation_id)
+        )
+        conversation = result.scalar_one_or_none()
+        if not conversation:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+        await _get_owned_session(conversation.session_id, _user_id(current_user), db)
+
+        # Fetch the conversation's messages
+        msgs_result = await db.execute(
+            select(Message)
+            .where(Message.session_id == conversation.session_id)
+            .where(Message.role.in_(("user", "assistant")))
+            .order_by(Message.created_at)
+        )
+        messages = msgs_result.scalars().all()
+        if not messages:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Nothing to summarize — conversation has no messages yet",
+            )
+
+        # Render as a plain transcript. Keep within input cap to avoid runaway token cost.
+        lines: list[str] = []
+        for m in messages:
+            speaker = "User" if m.role == "user" else "Assistant"
+            lines.append(f"{speaker}: {m.content}")
+        transcript = "\n".join(lines)
+        if len(transcript) > _SUMMARY_MAX_INPUT_CHARS:
+            transcript = transcript[-_SUMMARY_MAX_INPUT_CHARS:]
+            transcript = "[…earlier turns truncated…]\n" + transcript
+
+        summary_prompt = (
+            "Summarize the conversation below in 2–3 short sentences. "
+            "Focus on what was discussed and any conclusions or decisions. "
+            "Write in third person. Do not start with 'This conversation' "
+            "or 'The user'. No preamble.\n\n"
+            f"{transcript}"
+        )
+        try:
+            summary = await llm_service.generate_response(
+                messages=[{"role": "user", "content": summary_prompt}],
+                system_prompt="You write concise neutral summaries.",
+            )
+        except Exception as e:
+            logger.error(f"LLM summary call failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Summary service unavailable",
+            )
+
+        conversation.summary = (summary or "").strip()
+        await db.commit()
+        await db.refresh(conversation)
+        logger.info(f"Conversation {conversation_id} summarized ({len(messages)} msgs)")
+        return conversation
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Failed to summarize conversation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to summarize conversation",
         )
 
 

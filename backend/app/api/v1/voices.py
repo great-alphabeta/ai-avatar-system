@@ -8,7 +8,7 @@ users cannot see or mutate someone else's voices.
 """
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 import asyncio
 import subprocess
 import uuid
@@ -222,6 +222,66 @@ async def get_voice(
                 raise HTTPException(status_code=403, detail="Not authorised to access this voice")
             return {k: v for k, v in entry.items() if k != "wav_path"}
     raise HTTPException(status_code=404, detail="Voice profile not found")
+
+
+# Hard cap for ad-hoc TTS preview requests. Long inputs would waste GPU time
+# and let a malicious client churn the TTS engine.
+_PREVIEW_TEXT_MAX_CHARS = 240
+_PREVIEW_DEFAULT_TEXT = "Hello! This is a quick preview of my voice — what do you think?"
+
+
+@router.post("/{voice_id}/synthesize")
+async def synthesize_voice_preview(
+    voice_id: str,
+    text: Optional[str] = Form(default=None),
+    language: Optional[str] = Form(default="en"),
+    current_user: Optional[User] = Depends(get_current_user),
+):
+    """
+    Synthesize a short sample with this voice profile and return WAV audio.
+    Useful for "hear what this voice sounds like" UX before committing the
+    voice to an avatar.
+    """
+    uid = _user_id(current_user)
+    entry = next((e for e in await _load_index() if e["id"] == voice_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Voice profile not found")
+    if not _owned(entry, uid):
+        raise HTTPException(status_code=403, detail="Not authorised to preview this voice")
+
+    sample_text = (text or _PREVIEW_DEFAULT_TEXT).strip()
+    if not sample_text:
+        sample_text = _PREVIEW_DEFAULT_TEXT
+    if len(sample_text) > _PREVIEW_TEXT_MAX_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preview text too long (max {_PREVIEW_TEXT_MAX_CHARS} chars)",
+        )
+
+    lang = (language or entry.get("language") or "en").strip().lower()
+    if lang not in _ALLOWED_LANGUAGES:
+        lang = "en"
+
+    wav_path = entry.get("wav_path")
+    if not wav_path or not Path(wav_path).exists():
+        raise HTTPException(status_code=404, detail="Voice WAV missing on disk")
+
+    try:
+        from app.services.tts import tts_service
+        audio_bytes = await tts_service.synthesize_bytes(
+            text=sample_text,
+            speaker_wav=wav_path,
+            language=lang,
+        )
+    except Exception as e:
+        logger.exception("Voice synthesis preview failed")
+        raise HTTPException(status_code=500, detail=f"Synthesis failed: {e.__class__.__name__}")
+
+    return Response(
+        content=audio_bytes,
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/{voice_id}/preview")

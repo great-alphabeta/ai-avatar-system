@@ -6,10 +6,14 @@ remain compatible — Chatterbox accepts any WAV reference for zero-shot cloning
 
 Falls back to Google TTS (gTTS) if model loading or synthesis fails so the
 chat pipeline degrades gracefully rather than 500ing the whole turn.
+
+Synthesis result reports which engine produced the audio so the caller can
+notify the user when voice cloning was silently dropped during fallback.
 """
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +23,14 @@ import torchaudio
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SynthResult:
+    output_path: str
+    engine: str  # "chatterbox" or "gtts"
+    fallback: bool  # True if the caller's preferred path was not taken
+    voice_cloned: bool  # True if a speaker WAV was actually applied
 
 
 class TTSService:
@@ -62,7 +74,7 @@ class TTSService:
         output_path: str,
         speaker_wav: Optional[str] = None,
         language: str = "en",
-    ) -> str:
+    ) -> SynthResult:
         """
         Synthesize speech.
 
@@ -73,9 +85,12 @@ class TTSService:
             language: 2-letter code from Chatterbox's 23-language set.
 
         Returns:
-            Path to the generated WAV file.
+            SynthResult describing the WAV path and which engine was used.
+            `fallback=True` indicates the preferred Chatterbox path failed
+            and gTTS was used instead — voice cloning is lost in that case.
         """
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        wanted_clone = bool(speaker_wav)
 
         try:
             if self.model is None:
@@ -99,7 +114,12 @@ class TTSService:
             logger.info(
                 f"Synthesis complete{' (cloned voice)' if speaker_wav else ''}: {output_path}"
             )
-            return output_path
+            return SynthResult(
+                output_path=output_path,
+                engine="chatterbox",
+                fallback=False,
+                voice_cloned=bool(speaker_wav),
+            )
 
         except Exception as e:
             if speaker_wav:
@@ -109,7 +129,13 @@ class TTSService:
                 )
             else:
                 logger.warning(f"Chatterbox failed ({e}), falling back to gTTS")
-            return await self._gtts_fallback(text, output_path, language)
+            await self._gtts_fallback(text, output_path, language)
+            return SynthResult(
+                output_path=output_path,
+                engine="gtts",
+                fallback=True,
+                voice_cloned=False,
+            )
 
     async def _gtts_fallback(self, text: str, output_path: str, language: str = "en") -> str:
         """Network-only fallback using Google TTS — no GPU/local model required."""
@@ -151,6 +177,10 @@ class TTSService:
             return Path(tmp_path).read_bytes()
         finally:
             Path(tmp_path).unlink(missing_ok=True)
+
+
+# Suppress unused-name warning — re-exported for type hints elsewhere
+__all__ = ["TTSService", "SynthResult", "tts_service"]
 
 
 # Global instance
