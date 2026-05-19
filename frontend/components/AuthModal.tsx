@@ -1,17 +1,66 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Sparkles, Loader2, Eye, EyeOff, UserPlus, LogIn, User } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { api } from '@/lib/api'
 import { useStore } from '@/store/useStore'
 import type { ApiError } from '@/lib/types'
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 export function AuthModal() {
   const { setAuth } = useStore()
   const [tab, setTab] = useState<'login' | 'register'>('login')
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const dialogRef = useRef<HTMLDivElement>(null)
+
+  // Focus trap: keep Tab cycling inside the modal, and auto-focus the first
+  // input when it opens. ESC is intentionally not used to close — there's
+  // nothing to fall back to (the auth gate IS the app).
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+
+    const focusables = () =>
+      Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+        .filter(el => !el.hasAttribute('disabled') && el.offsetParent !== null)
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return
+      const els = focusables()
+      if (els.length === 0) return
+      const first = els[0]
+      const last = els[els.length - 1]
+      const active = document.activeElement as HTMLElement | null
+      if (e.shiftKey) {
+        if (active === first || !dialog.contains(active)) {
+          e.preventDefault()
+          last.focus()
+        }
+      } else if (active === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+
+    // Defer focusing the first input until after the modal mounts
+    const t = window.setTimeout(() => {
+      const el = focusables()[1] || focusables()[0]
+      el?.focus()
+    }, 50)
+
+    document.addEventListener('keydown', onKeyDown)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.clearTimeout(t)
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [])
 
   // Login fields
   const [loginEmail, setLoginEmail] = useState('')
@@ -64,16 +113,22 @@ export function AuthModal() {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-surface-950/90 backdrop-blur-md">
-      <div className="w-full max-w-md mx-4 glass-card rounded-2xl p-8 animate-scale-in">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-surface-950/90 backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="auth-modal-title"
+      aria-describedby="auth-modal-desc"
+    >
+      <div ref={dialogRef} className="w-full max-w-md mx-4 glass-card rounded-2xl p-8 animate-scale-in">
         {/* Logo */}
         <div className="flex flex-col items-center gap-3 mb-8">
           <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary-500 to-accent-600 flex items-center justify-center shadow-glow">
             <Sparkles size={22} className="text-white" />
           </div>
           <div className="text-center">
-            <h1 className="text-2xl font-black gradient-text">AvatarAI</h1>
-            <p className="text-sm text-gray-500 mt-0.5">Sign in to your account</p>
+            <h1 id="auth-modal-title" className="text-2xl font-black gradient-text">AvatarAI</h1>
+            <p id="auth-modal-desc" className="text-sm text-gray-500 mt-0.5">Sign in to your account</p>
           </div>
         </div>
 

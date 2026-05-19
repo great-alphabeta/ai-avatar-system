@@ -21,9 +21,18 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
+        {/* Skip link — appears only on keyboard focus, lets users bypass the nav */}
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[100]
+                     focus:px-4 focus:py-2 focus:rounded-lg focus:bg-primary-600 focus:text-white
+                     focus:shadow-glow focus:outline-none focus:ring-2 focus:ring-primary-300"
+        >
+          Skip to main content
+        </a>
         <QueryProvider>
           <ErrorBoundary>
-            {children}
+            <div id="main-content">{children}</div>
           </ErrorBoundary>
           <Toaster
             position="top-right"
