@@ -48,13 +48,25 @@ if settings.SENTRY_DSN:
 async def lifespan(app: FastAPI):
     logger.info("Starting AI Avatar System...")
 
-    # Create database tables (non-fatal if DB not available yet)
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables created/verified")
-    except Exception as e:
-        logger.warning(f"Database not available at startup (will retry on first request): {e}")
+    # Schema management:
+    #   * Production runs `alembic upgrade head` in entrypoint.sh BEFORE the
+    #     app starts, so the schema (including the perf indexes from
+    #     migration 0002) is already current here. We must NOT run
+    #     create_all in that path — create_all silently ignores index
+    #     additions on existing tables, so relying on it would hide
+    #     migration drift and leave prod without the indexes.
+    #   * Local dev / quick starts without the entrypoint get create_all as a
+    #     convenience so `uvicorn main:app` against a fresh DB just works.
+    # Gate on DEBUG to pick the right behavior.
+    if settings.DEBUG:
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables created/verified (DEBUG create_all)")
+        except Exception as e:
+            logger.warning(f"Database not available at startup (will retry on first request): {e}")
+    else:
+        logger.info("Skipping create_all; schema is managed by Alembic (alembic upgrade head)")
 
     # Initialize services (non-fatal)
     try:
