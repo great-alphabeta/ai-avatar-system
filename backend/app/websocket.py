@@ -87,12 +87,17 @@ class ConnectionManager:
         # barge-in: when a fresh user input arrives we cancel the in-flight
         # task instead of queueing.
         self._active_turns: Dict[str, asyncio.Task] = {}
+        # Per-session send lock. The turn task streams chunks while the WS
+        # receive loop may also send (pong/error) — without this, two
+        # coroutines could interleave mid-frame and corrupt the connection.
+        self._send_locks: Dict[str, asyncio.Lock] = {}
 
     # ── connection lifecycle ──────────────────────────────────────────────────
 
     async def connect(self, session_id: str, websocket: WebSocket, user_id: Optional[str] = None):
         await websocket.accept()
         self.active_connections[session_id] = websocket
+        self._send_locks[session_id] = asyncio.Lock()
         self.session_data[session_id] = {
             "messages": [],
             "avatar_id": None,
@@ -238,6 +243,7 @@ class ConnectionManager:
 
         self.active_connections.pop(session_id, None)
         self.session_data.pop(session_id, None)
+        self._send_locks.pop(session_id, None)
         # Best-effort wipe of the per-session temp dir. We use shutil.rmtree
         # via to_thread because rmtree on a large dir can briefly block.
         session_dir = TMPDIR / f"avatar-session-{session_id}"
@@ -270,12 +276,18 @@ class ConnectionManager:
 
     async def send_message(self, session_id: str, message: dict):
         ws = self.active_connections.get(session_id)
-        if ws:
-            try:
+        if not ws:
+            return
+        lock = self._send_locks.get(session_id)
+        try:
+            if lock is not None:
+                async with lock:
+                    await ws.send_json(message)
+            else:
                 await ws.send_json(message)
-            except Exception as e:
-                logger.error(f"Send failed [{session_id}]: {e}")
-                await self.disconnect(session_id)
+        except Exception as e:
+            logger.error(f"Send failed [{session_id}]: {e}")
+            await self.disconnect(session_id)
 
     # ── DB persistence helpers ────────────────────────────────────────────────
 
@@ -344,12 +356,41 @@ class ConnectionManager:
 
     # ── handlers ──────────────────────────────────────────────────────────────
 
+    def _spawn_turn(self, session_id: str, coro) -> None:
+        """
+        Register `coro` as the session's active turn and schedule it WITHOUT
+        awaiting. This is the heart of barge-in: the WebSocket receive loop
+        must return to `receive_json()` immediately so it can observe the next
+        client message (a new turn or an explicit stop) while this one streams.
+
+        A done-callback clears the slot and logs unhandled errors. We never
+        await the task here, so an exception inside it can't crash the WS loop.
+        """
+        task = asyncio.create_task(coro, name=f"turn-{session_id}")
+        self._active_turns[session_id] = task
+
+        def _done(t: asyncio.Task) -> None:
+            if self._active_turns.get(session_id) is t:
+                self._active_turns.pop(session_id, None)
+            if t.cancelled():
+                logger.info(f"Turn for {session_id} cancelled (barge-in or disconnect)")
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(f"Turn task for {session_id} failed: {exc!r}")
+
+        task.add_done_callback(_done)
+
     async def handle_audio_input(self, session_id: str, audio_data: str):
-        # Barge-in: if a previous turn is still streaming TTS/video, kill it
-        # before starting a new one. This matches the 2026 voice-AI UX
-        # convention — users expect the assistant to stop talking the moment
-        # they start.
+        """
+        Non-blocking dispatcher: interrupt any prior turn, then run STT +
+        the full chat turn inside a tracked task so the WS loop stays free to
+        receive the next message (enabling barge-in even mid-transcription).
+        """
         await self.interrupt_active_turn(session_id)
+        self._spawn_turn(session_id, self._handle_audio_inner(session_id, audio_data))
+
+    async def _handle_audio_inner(self, session_id: str, audio_data: str) -> None:
         tmp_audio = _private_session_dir(session_id) / "input.webm"
         try:
             await self.send_message(session_id, {
@@ -375,8 +416,11 @@ class ConnectionManager:
                 return
 
             await self.send_message(session_id, {"type": "transcription", "text": text})
-            await self.handle_text_input(session_id, text)
+            # Run the text turn directly (we're already inside the tracked task).
+            await self._handle_text_input_inner(session_id, text)
 
+        except asyncio.CancelledError:
+            raise  # propagate barge-in cancellation cleanly
         except Exception as e:
             logger.error(f"Audio error [{session_id}]: {e}")
             await self.send_message(session_id, {"type": "error", "message": "Audio processing failed"})
@@ -385,15 +429,17 @@ class ConnectionManager:
 
     async def handle_text_input(self, session_id: str, text: str):
         """
-        Streaming pipeline:
-          1. Stream LLM tokens → send `token` events for live UI display
-          2. Detect sentence boundaries during streaming → enqueue sentences
-          3. Consumer coroutine picks up each sentence and runs TTS+animation
-             in parallel with ongoing LLM generation (first chunk starts before
-             the LLM finishes the full response)
+        Non-blocking dispatcher for a text turn. Validates inline (so the
+        client gets immediate feedback on empty/oversized input), interrupts
+        any in-flight turn, then spawns the streaming pipeline as a tracked
+        task and returns immediately.
 
-        The actual work runs inside a tracked task so a subsequent user input
-        (text or audio) can cancel it cleanly for barge-in.
+        Pipeline (inside `_handle_text_input_inner`):
+          1. Stream LLM tokens → `token` events for live UI display
+          2. Detect sentence boundaries → enqueue complete sentences
+          3. Consumer runs TTS + animation per sentence, streaming
+             `video_chunk` events as each completes (first chunk starts
+             before the LLM finishes the full response)
         """
         text = (text or "").strip()
         if not text:
@@ -406,23 +452,8 @@ class ConnectionManager:
             })
             return
 
-        # If a previous turn for this session is still streaming, cut it off.
         await self.interrupt_active_turn(session_id)
-
-        async def _run_turn() -> None:
-            await self._handle_text_input_inner(session_id, text)
-
-        task = asyncio.create_task(_run_turn(), name=f"turn-{session_id}")
-        self._active_turns[session_id] = task
-        try:
-            await task
-        except asyncio.CancelledError:
-            logger.info(f"Turn for {session_id} cancelled (barge-in or disconnect)")
-        finally:
-            # Only clear the slot if it still points at us (a new turn may
-            # have already replaced it during cancellation).
-            if self._active_turns.get(session_id) is task:
-                self._active_turns.pop(session_id, None)
+        self._spawn_turn(session_id, self._handle_text_input_inner(session_id, text))
 
     async def _handle_text_input_inner(self, session_id: str, text: str):
         started_at = datetime.now(timezone.utc)

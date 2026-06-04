@@ -5,7 +5,7 @@ import {
   Send, Mic, MicOff, Video, Loader2, Volume2, VolumeX,
   Sparkles, Clock, Copy, RotateCcw, Wand2,
   MessageCircle, Zap, Activity, Download, Globe,
-  Pencil, Trash2, Check, X, Keyboard, Plug,
+  Pencil, Trash2, Check, X, Keyboard, Plug, Square,
 } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
 import { toast } from 'react-hot-toast'
@@ -475,6 +475,24 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
     chunkQueueRef.current = []
     isPlayingRef.current = false
     setShowVideo(false)
+  }
+
+  // Barge-in: tell the backend to cancel the in-flight turn and stop playback
+  // locally right away (don't wait for the round-trip `interrupted` event).
+  const stopGeneration = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'stop' }))
+    }
+    chunkQueueRef.current = []
+    isPlayingRef.current = false
+    setShowVideo(false)
+    if (videoRef.current) {
+      videoRef.current.pause()
+      videoRef.current.src = ''
+    }
+    setIsProcessing(false)
+    setIsTyping(false)
+    setStreamingContent('')
   }
 
   const exportConversation = () => {
@@ -1056,16 +1074,29 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
               />
             </div>
 
-            <button
-              onClick={sendMessage}
-              disabled={!inputText.trim() || isProcessing || isRecording}
-              aria-label={isProcessing ? 'Sending message' : 'Send message'}
-              className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600
-                         flex items-center justify-center text-white hover:shadow-glow
-                         disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-95"
-            >
-              {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
-            </button>
+            {(isProcessing || isSpeaking) ? (
+              <button
+                onClick={stopGeneration}
+                aria-label="Stop generating"
+                title="Stop"
+                className="flex-shrink-0 w-10 h-10 rounded-xl bg-red-600 hover:bg-red-500
+                           flex items-center justify-center text-white shadow-[0_0_18px_rgba(239,68,68,0.4)]
+                           transition-all duration-200 active:scale-95"
+              >
+                <Square size={16} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                onClick={sendMessage}
+                disabled={!inputText.trim() || isRecording}
+                aria-label="Send message"
+                className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-primary-600 to-accent-600
+                           flex items-center justify-center text-white hover:shadow-glow
+                           disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 active:scale-95"
+              >
+                <Send size={18} />
+              </button>
+            )}
           </div>
 
           <p className="text-xs text-gray-600 text-center mt-2">

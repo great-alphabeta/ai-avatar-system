@@ -291,39 +291,51 @@ async def websocket_endpoint(
     await websocket_manager.connect(session_id, websocket, user_id=user_id)
     try:
         while True:
+            # This loop must never block on a full turn — handle_text_input /
+            # handle_audio_input dispatch the work as a background task and
+            # return immediately, so we come straight back to receive_json()
+            # and can observe a barge-in ("text"/"audio" mid-response) or an
+            # explicit "stop". All sends route through the manager's locked
+            # send_message so they can't interleave with the turn task's
+            # streaming sends.
             data = await websocket.receive_json()
             msg_type = data.get("type")
 
             if msg_type == "audio":
                 audio_data = data.get("audio")
                 if not audio_data:
-                    await websocket.send_json({"type": "error", "message": "Missing audio data"})
+                    await websocket_manager.send_message(session_id, {"type": "error", "message": "Missing audio data"})
                     continue
                 await websocket_manager.handle_audio_input(session_id, audio_data)
 
             elif msg_type == "text":
                 text_data = data.get("text")
                 if not text_data:
-                    await websocket.send_json({"type": "error", "message": "Missing text data"})
+                    await websocket_manager.send_message(session_id, {"type": "error", "message": "Missing text data"})
                     continue
                 await websocket_manager.handle_text_input(session_id, text_data)
+
+            elif msg_type in ("stop", "interrupt"):
+                # Explicit barge-in from a "stop" button — cancel the current
+                # turn without starting a new one.
+                await websocket_manager.interrupt_active_turn(session_id)
 
             elif msg_type == "set_voice":
                 # Accept voice_id only — never a raw filesystem path from the client.
                 voice_id = data.get("voice_id")
                 if not voice_id or not isinstance(voice_id, str):
-                    await websocket.send_json({"type": "error", "message": "Missing voice_id"})
+                    await websocket_manager.send_message(session_id, {"type": "error", "message": "Missing voice_id"})
                     continue
                 ok = await websocket_manager.set_voice_by_id(session_id, voice_id)
                 if not ok:
-                    await websocket.send_json({"type": "error", "message": "Voice profile not found"})
+                    await websocket_manager.send_message(session_id, {"type": "error", "message": "Voice profile not found"})
 
             elif msg_type == "set_language":
                 lang = data.get("language", "en")
                 await websocket_manager.set_language(session_id, lang)
 
             elif msg_type == "ping":
-                await websocket.send_json({"type": "pong"})
+                await websocket_manager.send_message(session_id, {"type": "pong"})
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from session {session_id}")
