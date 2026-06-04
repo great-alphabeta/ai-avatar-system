@@ -43,6 +43,9 @@ interface VideoChunk {
 interface ChatInterfaceProps {
   avatarId: string
   voiceId?: string
+  /** When set, resume this existing session (from history) instead of creating
+   *  a fresh one — the backend rehydrates the prior messages on connect. */
+  resumeSessionId?: string
   onSessionCreated?: (sessionId: string) => void
 }
 
@@ -156,7 +159,7 @@ function IdleAvatar({ imageUrl }: { imageUrl: string | null }) {
   )
 }
 
-export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInterfaceProps) {
+export function ChatInterface({ avatarId, voiceId, resumeSessionId, onSessionCreated }: ChatInterfaceProps) {
   const setWsConnected = useStore((s) => s.setWsConnected)
 
   const [messages, setMessages] = useState<Message[]>([])
@@ -180,6 +183,9 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  // True only when THIS mount created the session — so we end it on unmount.
+  // A resumed session (opened from history) is left intact when the user leaves.
+  const createdHereRef = useRef(false)
 
   // Edit/delete state. We track by message id (the persisted DB id) so the
   // hover menu can drive the corresponding API call.
@@ -273,30 +279,48 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
   useEffect(scrollToBottom, [messages, isTyping, scrollToBottom])
 
   // ── WebSocket ────────────────────────────────────────────────────────────
+  // Load a session's persisted messages into the transcript (used both on a
+  // fresh session — usually empty — and when resuming one from history).
+  const loadHistory = useCallback(async (sid: string) => {
+    try {
+      const prev = await api.getMessages(sid)
+      if (Array.isArray(prev) && prev.length > 0) {
+        setMessages(prev
+          .filter((m: ChatMessage) => m.role === 'user' || m.role === 'assistant')
+          .map((m: ChatMessage) => ({
+            id: m.id,
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+            timestamp: new Date(m.created_at),
+            emotion: detectEmotion(m.content),
+            persisted: true,
+          }))
+        )
+      }
+    } catch { /* ignore — history is non-critical */ }
+  }, [])
+
+  // Attach to an EXISTING session (resume from history). The backend
+  // rehydrates the LLM context on connect; we restore the visible transcript.
+  const adoptSession = useCallback((sid: string) => {
+    setSessionId(sid)
+    sessionIdRef.current = sid
+    createdHereRef.current = false
+    connectWebSocket(sid)
+    onSessionCreated?.(sid)
+    loadHistory(sid)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadHistory])
+
   const createSessionMutation = useMutation({
     mutationFn: () => api.createSession(avatarId),
     onSuccess: async (data) => {
       setSessionId(data.id)
       sessionIdRef.current = data.id
+      createdHereRef.current = true
       connectWebSocket(data.id)
       onSessionCreated?.(data.id)
-      // Restore previous messages for this session
-      try {
-        const prev = await api.getMessages(data.id)
-        if (Array.isArray(prev) && prev.length > 0) {
-          setMessages(prev
-            .filter((m: ChatMessage) => m.role === 'user' || m.role === 'assistant')
-            .map((m: ChatMessage) => ({
-              id: m.id,
-              role: m.role as 'user' | 'assistant',
-              content: m.content,
-              timestamp: new Date(m.created_at),
-              emotion: detectEmotion(m.content),
-              persisted: true,
-            }))
-          )
-        }
-      } catch { /* ignore — history is non-critical */ }
+      await loadHistory(data.id)
     },
     onError: () => {
       toast.error('Failed to start session')
@@ -674,7 +698,13 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
   }, [showShortcuts])
 
   useEffect(() => {
-    createSessionMutation.mutate()
+    // Resume an existing conversation if asked (history "Open"), otherwise
+    // create a fresh session.
+    if (resumeSessionId) {
+      adoptSession(resumeSessionId)
+    } else {
+      createSessionMutation.mutate()
+    }
     return () => {
       // Cancel any pending reconnect
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
@@ -682,9 +712,10 @@ export function ChatInterface({ avatarId, voiceId, onSessionCreated }: ChatInter
       sessionIdRef.current = null
       ws?.close()
       setWsConnected(false)
-      // Best-effort session end (fire-and-forget)
+      // Only end sessions WE created — leaving a resumed conversation should
+      // not mark the user's existing session as ended.
       const sid = sessionId
-      if (sid) api.endSession(sid).catch(() => {})
+      if (sid && createdHereRef.current) api.endSession(sid).catch(() => {})
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

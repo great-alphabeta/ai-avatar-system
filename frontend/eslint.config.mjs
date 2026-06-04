@@ -26,6 +26,10 @@ const eslintConfig = [
       // in render is a real determinism bug worth catching.
       'react-hooks/immutability': 'off',
       'react-hooks/preserve-manual-memoization': 'off',
+      // The mount effect adopts/creates the chat session and sets state once —
+      // a single extra render on mount, not the cascading-render problem this
+      // compiler rule targets. Off, consistent with the rules above.
+      'react-hooks/set-state-in-effect': 'off',
     },
   },
 ]

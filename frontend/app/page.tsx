@@ -115,6 +115,11 @@ export default function Home() {
   const { isAuthenticated, user, clearAuth } = useStore()
   const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  // Session id to RESUME (set only when opening from history). Distinct from
+  // activeSessionId (reported back after a session starts) so it can key the
+  // ChatInterface without remounting mid-conversation when a fresh session id
+  // arrives.
+  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null)
   const [view, setView] = useState<View>('home')
 
   const handleVoiceSelect = async (voiceId: string) => {
@@ -132,15 +137,19 @@ export default function Home() {
 
   const handleSelectAvatar = (id: string) => {
     setSelectedAvatar(id)
+    setResumeSessionId(null)  // picking an avatar starts a fresh conversation
   }
 
   const handleStartChat = () => {
-    if (selectedAvatar) setView('chat')
+    if (selectedAvatar) {
+      setResumeSessionId(null)  // "Start Conversation" = fresh session
+      setView('chat')
+    }
   }
 
   const handleResumeFromHistory = (avatarId: string, sessionId: string) => {
     setSelectedAvatar(avatarId)
-    setActiveSessionId(sessionId)
+    setResumeSessionId(sessionId)  // resume this exact conversation
     setView('chat')
   }
 
@@ -352,8 +361,9 @@ export default function Home() {
               <p className="text-gray-400">Talk to your AI avatar in real time.</p>
             </div>
             <ChatInterface
-              key={`${selectedAvatar}:${activeSessionId ?? 'new'}`}
+              key={`${selectedAvatar}:${resumeSessionId ?? 'new'}`}
               avatarId={selectedAvatar}
+              resumeSessionId={resumeSessionId ?? undefined}
               onSessionCreated={setActiveSessionId}
             />
           </div>
