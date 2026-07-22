@@ -1,506 +1,130 @@
-# 🎬 AI Avatar System - Complete Setup Guide
+# AI Avatar System — Setup Guide
 
-## 📋 Prerequisites
+## Prerequisites
 
-### Required Software
-- **Docker** (20.10+) and **Docker Compose** (2.0+)
-- **Python** 3.10+
-- **Node.js** 18+
-- **AWS CLI** configured with credentials
+- **Docker** (20.10+) and **Docker Compose** (v2+)
+- **NVIDIA Container Toolkit** (recommended for STT / TTS / MuseTalk)
+- **Python** 3.10+ (only if running the thin API outside Docker)
+- **Node.js** 18+ (only if running the frontend outside Docker)
 - **Git**
-- **GPU** (Optional but recommended for avatar animation)
-  - NVIDIA GPU with CUDA 11.8+
-  - NVIDIA Container Toolkit installed
+- API keys: Anthropic and/or OpenAI (or Ollama for local LLM)
 
-### AWS Services Needed
-- S3 (Storage)
-- RDS PostgreSQL (Database)
-- ElastiCache Redis (Caching)
-- ECS/Fargate (Container orchestration)
-- CloudFront (CDN)
-- Route53 (DNS - optional)
+## Architecture (Docker-isolated ML)
 
-### API Keys Required
-- **Anthropic API Key** (for Claude)
-- **OpenAI API Key** (for Whisper/GPT-4 - optional)
-- **AWS Credentials** (Access Key ID and Secret Access Key)
+| Container | Role | Python env |
+|---|---|---|
+| `backend` | Thin FastAPI API + WebSocket | Slim (no torch) |
+| `stt` | Whisper STT | Own CUDA image |
+| `tts` | Chatterbox TTS (+ edge-tts/gTTS fallback) | Own CUDA image |
+| `musetalk` | MuseTalk lip-sync (+ FFmpeg simple fallback) | Own CUDA image |
+| `postgres` / `redis` / `frontend` / `celery-worker` | Infra & UI | — |
 
----
+Shared media lives on the `media_data` volume mounted at `/media` so services can pass filesystem paths.
 
-## 🚀 Quick Start (Local Development)
-
-### Step 1: Clone and Setup
+## Quick Start
 
 ```bash
-cd C:\Users\punit\Downloads\Avatar
+cp .env.example .env
+# Fill SECRET_KEY, JWT_SECRET_KEY, ANTHROPIC_API_KEY (or OPENAI_API_KEY)
 
-# Copy environment file
-copy .env.example .env
+docker compose up -d --build
 ```
 
-### Step 2: Configure Environment Variables
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:3000 |
+| Backend API | http://localhost:8000 |
+| API docs | http://localhost:8000/docs |
+| Flower | http://localhost:5555 |
 
-Edit `.env` file with your credentials:
+Health (includes remote ML reachability):
+
+```bash
+curl http://localhost:8000/health
+docker compose ps
+```
+
+## MuseTalk models (~9 GB)
+
+```bash
+bash scripts/setup_musetalk.sh
+# Writes into services/musetalk/models/MuseTalk
+# Set AVATAR_ENGINE=musetalk in .env
+docker compose restart musetalk
+```
+
+## Configuration
+
+### LLM
 
 ```env
-# AWS Configuration
-AWS_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXX
-AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-AWS_REGION=us-east-1
-S3_BUCKET_NAME=your-avatar-bucket-name
-
-# API Keys
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxx
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxx
-
-# Database (auto-configured for Docker)
-DATABASE_PASSWORD=SuperSecurePassword123!
-
-# Application
-SECRET_KEY=your-super-secret-key-change-this
-ENVIRONMENT=development
-DEBUG=true
+LLM_PROVIDER=anthropic          # anthropic | openai | ollama
+LLM_MODEL=claude-sonnet-4-6
+ANTHROPIC_API_KEY=...
 ```
 
-### Step 3: Start Services
+Local Ollama (compose profile):
 
 ```bash
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Check service status
-docker-compose ps
+docker compose --profile ollama up -d
 ```
 
-### Step 4: Access Application
-
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000
-- **API Documentation**: http://localhost:8000/docs
-- **Celery Flower**: http://localhost:5555
-
----
-
-## 📦 Installation Methods
-
-### Method 1: Docker (Recommended)
-
-```bash
-# Build and start
-docker-compose up --build -d
-
-# Stop
-docker-compose down
-
-# Stop and remove volumes
-docker-compose down -v
-```
-
-### Method 2: Manual Installation
-
-#### Backend Setup
-
-```bash
-cd backend
-
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# Linux/Mac:
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run migrations
-alembic upgrade head
-
-# Start server
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
-
-#### Frontend Setup
-
-```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
-```
-
----
-
-## 🏗️ AWS Deployment
-
-### Step 1: Setup AWS Infrastructure
-
-```bash
-# Initialize Terraform
-cd infrastructure
-terraform init
-
-# Create terraform.tfvars
-cat > terraform.tfvars <<EOF
-aws_region      = "us-east-1"
-environment     = "production"
-s3_bucket_name  = "my-avatar-system-storage"
-db_password     = "SuperSecurePassword123!"
-EOF
-
-# Plan deployment
-terraform plan -out=tfplan
-
-# Apply infrastructure
-terraform apply tfplan
-```
-
-### Step 2: Deploy Application
-
-```bash
-# Make deploy script executable
-chmod +x deploy.sh
-
-# Deploy to AWS
-./deploy.sh production
-```
-
-### Step 3: Setup DNS (Optional)
-
-1. Go to Route53 in AWS Console
-2. Create a hosted zone for your domain
-3. Create A record pointing to CloudFront distribution
-4. Update nameservers at your domain registrar
-
----
-
-## 🔧 Configuration
-
-### Avatar Engine Options
-
-**MuseTalk** (Best quality, slower):
-```env
-AVATAR_ENGINE=sadtalker
-AVATAR_RESOLUTION=512
-```
-
-**MuseTalk** (Faster, good quality):
-```env
-AVATAR_ENGINE=liveportrait
-AVATAR_RESOLUTION=512
-```
-
-**Simple** (Fastest, static + audio):
-```env
-AVATAR_ENGINE=simple
-```
-
-### LLM Configuration
-
-**Use Claude (Recommended)**:
-```env
-LLM_PROVIDER=anthropic
-LLM_MODEL=claude-sonnet-4-20250514
-ANTHROPIC_API_KEY=your_key_here
-```
-
-**Use GPT-4**:
-```env
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4-turbo-preview
-OPENAI_API_KEY=your_key_here
-```
-
-**Use Local Llama 3**:
 ```env
 LLM_PROVIDER=ollama
-LLM_MODEL=llama3
-# Requires Ollama installed locally
+LLM_MODEL=llama3.1
+OPENAI_BASE_URL=http://ollama:11434/v1
 ```
 
-### STT/TTS Configuration
+### Avatar / STT / TTS
 
-**Whisper (STT)**:
 ```env
-STT_PROVIDER=whisper
-WHISPER_MODEL=base  # tiny, base, small, medium, large
+AVATAR_ENGINE=musetalk          # or simple
+WHISPER_MODEL=large-v3-turbo
+TTS_PROVIDER=chatterbox
+STT_URL=http://stt:8001
+TTS_URL=http://tts:8002
+MUSETALK_URL=http://musetalk:8003
 ```
 
-**Coqui TTS**:
-```env
-TTS_PROVIDER=coqui
-```
-
----
-
-## 📊 Monitoring & Maintenance
-
-### View Logs
+## Production
 
 ```bash
-# All services
-docker-compose logs -f
-
-# Specific service
-docker-compose logs -f backend
-
-# Last 100 lines
-docker-compose logs --tail=100 backend
+cp .env.prod.example .env.prod
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-### Database Management
+GPU is reserved for `stt`, `tts`, and `musetalk` only — the API stays CPU.
+
+## Manual thin API (ML still in Docker)
 
 ```bash
-# Access PostgreSQL
-docker-compose exec postgres psql -U avatar_user -d avatar_db
-
-# Backup database
-docker-compose exec postgres pg_dump -U avatar_user avatar_db > backup.sql
-
-# Restore database
-docker-compose exec -T postgres psql -U avatar_user avatar_db < backup.sql
-```
-
-### Redis Management
-
-```bash
-# Access Redis CLI
-docker-compose exec redis redis-cli
-
-# Clear cache
-docker-compose exec redis redis-cli FLUSHALL
-```
-
-### Celery Tasks
-
-```bash
-# View Celery Flower dashboard
-Open http://localhost:5555
-
-# Restart worker
-docker-compose restart celery-worker
-```
-
----
-
-## 🧪 Testing
-
-### Backend Tests
-
-```bash
+docker compose up -d postgres redis stt tts musetalk
 cd backend
-
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=app tests/
-
-# Run specific test
-pytest tests/test_avatars.py -v
+python -m venv venv
+# Windows: venv\Scripts\activate
+source venv/bin/activate
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn main:app --reload --port 8000
 ```
 
-### Frontend Tests
+## Troubleshooting
+
+**ML service unreachable / health degraded**
 
 ```bash
-cd frontend
-
-# Run tests
-npm test
-
-# Run with coverage
-npm test -- --coverage
+docker compose logs stt tts musetalk
+docker exec avatar-stt curl -fsS http://localhost:8001/health
 ```
 
-### Integration Tests
+**GPU not detected**
 
-```bash
-# Run integration tests
-docker-compose -f docker-compose.test.yml up --abort-on-container-exit
-```
+Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html), then `docker compose up -d` again.
 
----
+**MuseTalk falls back to simple**
 
-## 🔐 Security Best Practices
+Run `bash scripts/setup_musetalk.sh` and confirm `services/musetalk/models/MuseTalk/scripts/inference.py` exists.
 
-1. **Environment Variables**
-   - Never commit `.env` file
-   - Use AWS Secrets Manager for production
-   - Rotate API keys regularly
+## License
 
-2. **Database**
-   - Use strong passwords
-   - Enable SSL connections
-   - Regular backups
-
-3. **API**
-   - Enable rate limiting
-   - Use JWT authentication
-   - HTTPS only in production
-
-4. **S3**
-   - Enable bucket versioning
-   - Use presigned URLs for sensitive content
-   - Enable CloudFront for CDN
-
----
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Problem**: Database connection error
-```bash
-# Solution: Check PostgreSQL is running
-docker-compose ps postgres
-docker-compose logs postgres
-```
-
-**Problem**: GPU not detected
-```bash
-# Solution: Install NVIDIA Container Toolkit
-# https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
-```
-
-**Problem**: Out of memory
-```bash
-# Solution: Increase Docker memory limit
-# Docker Desktop > Settings > Resources > Memory
-```
-
-**Problem**: S3 upload fails
-```bash
-# Solution: Check AWS credentials
-aws s3 ls
-aws sts get-caller-identity
-```
-
-**Problem**: Avatar generation is slow
-```bash
-# Solution: 
-# 1. Use GPU if available
-# 2. Reduce AVATAR_RESOLUTION
-# 3. Use "simple" avatar engine for faster results
-```
-
----
-
-## 📈 Performance Optimization
-
-### Backend Optimization
-
-1. **Enable GPU acceleration**
-   ```yaml
-   # In docker-compose.yml
-   deploy:
-     resources:
-       reservations:
-         devices:
-           - driver: nvidia
-             count: 1
-             capabilities: [gpu]
-   ```
-
-2. **Increase workers**
-   ```bash
-   # In Dockerfile CMD
-   CMD ["uvicorn", "main:app", "--workers", "4"]
-   ```
-
-3. **Enable caching**
-   - Use Redis for session data
-   - Enable avatar video caching in database
-
-### Frontend Optimization
-
-1. **Enable Next.js image optimization**
-2. **Use CDN for static assets**
-3. **Enable compression**
-
-### Database Optimization
-
-1. **Add indexes**
-   ```sql
-   CREATE INDEX idx_avatar_user_id ON avatars(user_id);
-   CREATE INDEX idx_session_avatar_id ON sessions(avatar_id);
-   ```
-
-2. **Connection pooling**
-   ```python
-   # In config.py
-   pool_size=10
-   max_overflow=20
-   ```
-
----
-
-## 📚 API Documentation
-
-### Upload Avatar
-```http
-POST /api/v1/avatars/upload
-Content-Type: multipart/form-data
-
-name: "My Avatar"
-file: [image file]
-```
-
-### Create Session
-```http
-POST /api/v1/sessions/create
-Content-Type: application/json
-
-{
-  "avatar_id": "xxx-xxx-xxx",
-  "settings": {}
-}
-```
-
-### WebSocket Connection
-```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/session/{session_id}')
-
-// Send text message
-ws.send(JSON.stringify({
-  type: 'text',
-  data: { text: 'Hello!' }
-}))
-
-// Send audio
-ws.send(JSON.stringify({
-  type: 'audio',
-  data: { audio: base64AudioData }
-}))
-```
-
----
-
-## 🤝 Support
-
-### Get Help
-
-1. Check documentation: https://github.com/yourusername/avatar-system
-2. Open an issue: https://github.com/yourusername/avatar-system/issues
-3. Email support: support@yourdomain.com
-
-### Contributing
-
-Contributions are welcome! Please read CONTRIBUTING.md for guidelines.
-
----
-
-## 📄 License
-
-MIT License - See LICENSE file for details
-
----
-
-**Built with ❤️ for production use**
+MIT — see LICENSE.

@@ -84,7 +84,7 @@ if [ ! -f "$APP_DIR/.env.prod" ]; then
 fi
 
 # ── 5. Download MuseTalk models (first deploy only) ──────────────────────────
-if [ ! -f "$APP_DIR/backend/models/MuseTalk/models/musetalkV15/unet.pth" ]; then
+if [ ! -f "$APP_DIR/services/musetalk/models/MuseTalk/models/musetalkV15/unet.pth" ]; then
   echo "[5/6] Downloading MuseTalk models (~9 GB, takes 5-10 min)..."
   bash "$APP_DIR/scripts/setup_musetalk.sh"
 else
@@ -113,5 +113,5 @@ echo "  GPU status  :"
 docker exec avatar-backend nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu \
   --format=csv,noheader 2>/dev/null || echo "  (GPU info not yet available — backend still starting)"
 echo ""
-echo "  Logs        : docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f backend"
+echo "  Logs        : docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f backend stt tts musetalk"
 echo "========================================"

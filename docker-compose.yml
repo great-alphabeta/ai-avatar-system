@@ -44,6 +44,7 @@ services:
     networks:
       - avatar-network
 
+  # Thin FastAPI API — no heavy ML / no GPU
   backend:
     build:
       context: ./backend
@@ -62,20 +63,35 @@ services:
       - S3_BUCKET_NAME=${S3_BUCKET_NAME}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-6}
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - ENVIRONMENT=${ENVIRONMENT:-development}
       - DEBUG=${DEBUG:-true}
+      - USE_LOCAL_STORAGE=${USE_LOCAL_STORAGE:-true}
+      - AVATAR_ENGINE=${AVATAR_ENGINE:-musetalk}
+      - STT_URL=${STT_URL:-http://stt:8001}
+      - TTS_URL=${TTS_URL:-http://tts:8002}
+      - MUSETALK_URL=${MUSETALK_URL:-http://musetalk:8003}
+      - TMPDIR=/media
+      - MEDIA_ROOT=/media
     volumes:
       - ./backend:/app
-      - avatar_cache:/tmp/avatars
-      - video_cache:/tmp/videos
-      - audio_cache:/tmp/audio
+      - media_data:/media
       - voice_profiles:/app/voice_profiles
+      - avatar_uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      stt:
+        condition: service_healthy
+      tts:
+        condition: service_healthy
+      musetalk:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -83,6 +99,95 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      - avatar-network
+    restart: unless-stopped
+
+  # Whisper STT — isolated CUDA Python env
+  stt:
+    build:
+      context: ./services/stt
+      dockerfile: Dockerfile
+    container_name: avatar-stt
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
+      - TMPDIR=/media
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - media_data:/media
+      - whisper_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 120s
+    networks:
+      - avatar-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Chatterbox TTS — isolated CUDA Python env
+  tts:
+    build:
+      context: ./services/tts
+      dockerfile: Dockerfile
+    container_name: avatar-tts
+    environment:
+      - TTS_PROVIDER=${TTS_PROVIDER:-chatterbox}
+      - TMPDIR=/media
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - media_data:/media
+      - voice_profiles:/app/voice_profiles
+      - tts_cache:/root/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 180s
+    networks:
+      - avatar-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # MuseTalk lip-sync — isolated CUDA Python env
+  musetalk:
+    build:
+      context: ./services/musetalk
+      dockerfile: Dockerfile
+    container_name: avatar-musetalk
+    environment:
+      - AVATAR_ENGINE=${AVATAR_ENGINE:-musetalk}
+      - AVATAR_RESOLUTION=${AVATAR_RESOLUTION:-512}
+      - AVATAR_FPS=${AVATAR_FPS:-25}
+      - MUSETALK_PATH=/app/models/MuseTalk
+      - PYTHONPATH=/app/models/MuseTalk
+      - TMPDIR=/media
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - media_data:/media
+      # Host bind for easy setup via scripts/setup_musetalk.sh
+      - ./services/musetalk/models:/app/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 180s
     networks:
       - avatar-network
     restart: unless-stopped
@@ -98,9 +203,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      # NEXT_PUBLIC_* values are baked into the client bundle at BUILD time,
-      # so they must be passed as build args — runtime `environment` alone
-      # has no effect on the compiled JS.
       args:
         - NEXT_PUBLIC_API_URL=${BACKEND_URL:-http://localhost:8000}
         - NEXT_PUBLIC_WS_URL=${WS_URL:-ws://localhost:8000}
@@ -132,6 +234,7 @@ services:
       - avatar-network
     restart: unless-stopped
 
+  # Thin Celery worker — same slim API image, calls ML services over HTTP
   celery-worker:
     build:
       context: ./backend
@@ -147,16 +250,29 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - STT_URL=${STT_URL:-http://stt:8001}
+      - TTS_URL=${TTS_URL:-http://tts:8002}
+      - MUSETALK_URL=${MUSETALK_URL:-http://musetalk:8003}
+      - AVATAR_ENGINE=${AVATAR_ENGINE:-musetalk}
+      - TMPDIR=/media
+      - MEDIA_ROOT=/media
     volumes:
       - ./backend:/app
-      - avatar_cache:/tmp/avatars
-      - video_cache:/tmp/videos
-      - audio_cache:/tmp/audio
+      - media_data:/media
       - voice_profiles:/app/voice_profiles
+      - avatar_uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      stt:
+        condition: service_healthy
+      tts:
+        condition: service_healthy
+      musetalk:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$$HOSTNAME || exit 1"]
@@ -167,13 +283,6 @@ services:
     networks:
       - avatar-network
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
   flower:
     build:
@@ -186,6 +295,8 @@ services:
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
     depends_on:
       redis:
         condition: service_healthy
@@ -205,7 +316,26 @@ services:
       - avatar-network
     restart: unless-stopped
 
-  # Optional: Nginx reverse proxy
+  # Optional local LLM — enable with: docker compose --profile ollama up -d
+  ollama:
+    image: ollama/ollama:latest
+    container_name: avatar-ollama
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - avatar-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   nginx:
     image: nginx:alpine
     container_name: avatar-nginx
@@ -238,13 +368,19 @@ volumes:
     driver: local
   redis_data:
     driver: local
-  avatar_cache:
-    driver: local
-  video_cache:
-    driver: local
-  audio_cache:
+  media_data:
     driver: local
   voice_profiles:
+    driver: local
+  avatar_uploads:
+    driver: local
+  musetalk_models:
+    driver: local
+  whisper_cache:
+    driver: local
+  tts_cache:
+    driver: local
+  ollama_data:
     driver: local
 
 networks:

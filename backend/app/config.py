@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     AVATAR_FPS: int = 25
     MUSETALK_PATH: str = "models/MuseTalk"
 
+    # Isolated ML microservices (Docker network hostnames by default)
+    STT_URL: str = "http://stt:8001"
+    TTS_URL: str = "http://tts:8002"
+    MUSETALK_URL: str = "http://musetalk:8003"
+    STT_TIMEOUT_SECONDS: float = 120.0
+    TTS_TIMEOUT_SECONDS: float = 180.0
+    MUSETALK_TIMEOUT_SECONDS: float = 300.0
+
+    # Shared media root — must match the Docker volume mount (TMPDIR=/media)
+    MEDIA_ROOT: str = "/media"
+
     # STT Configuration
     # large-v3-turbo: best 2026 sweet spot — ~216x real-time on GPU, multilingual,
     # only ~1% lower WER than large-v3. Falls back to base/small if VRAM is tight.

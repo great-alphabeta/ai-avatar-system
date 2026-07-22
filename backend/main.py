@@ -209,21 +209,8 @@ async def health_check():
         services["redis"] = "disconnected"
         health["status"] = "degraded"
 
-    # GPU / avatar engine info
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            props = torch.cuda.get_device_properties(0)
-            used_gb = torch.cuda.memory_allocated(0) / 1024**3
-            total_gb = props.total_memory / 1024**3
-            services["gpu"] = f"{props.name} ({used_gb:.1f}/{total_gb:.1f} GB used)"
-        else:
-            services["gpu"] = "not available (CPU mode)"
-    except ImportError:
-        services["gpu"] = "torch not installed"
-    except Exception:
-        services["gpu"] = "error"
+    # GPU info comes from ML microservices (API image has no torch)
+    services["gpu"] = "see stt/tts/musetalk health (API has no local torch)"
 
     # LLM provider readiness — checks client wiring + API-key presence, not
     # a live network call (which would cost tokens on every /health hit).
@@ -246,17 +233,34 @@ async def health_check():
         services["llm"] = f"unknown provider: {settings.LLM_PROVIDER}"
         health["status"] = "degraded"
 
-    # STT / TTS model state — lazy-loaded, so just report whether warmed
+    # Remote ML microservices — report reachability instead of local model state
     try:
+        from app.services.animator import avatar_animator
         from app.services.stt import stt_service
         from app.services.tts import tts_service
 
-        services["stt"] = "loaded" if stt_service.model is not None else "lazy (not yet loaded)"
-        services["tts"] = "loaded" if tts_service.model is not None else "lazy (not yet loaded)"
+        stt_h = await stt_service.health()
+        tts_h = await tts_service.health()
+        anim_h = await avatar_animator.health()
+
+        services["stt"] = stt_h
+        services["tts"] = tts_h
+        services["musetalk"] = anim_h
+
+        for name, payload in (("stt", stt_h), ("tts", tts_h), ("musetalk", anim_h)):
+            status = payload.get("status") if isinstance(payload, dict) else None
+            if status not in ("ok",):
+                health["status"] = "degraded"
     except Exception as e:
-        services["stt"] = services["tts"] = f"error: {e}"
+        services["stt"] = services["tts"] = services["musetalk"] = f"error: {e}"
+        health["status"] = "degraded"
 
     health["avatar_engine"] = settings.AVATAR_ENGINE
+    health["ml_urls"] = {
+        "stt": settings.STT_URL,
+        "tts": settings.TTS_URL,
+        "musetalk": settings.MUSETALK_URL,
+    }
     health["active_ws_sessions"] = len(websocket_manager.active_connections)
 
     return health

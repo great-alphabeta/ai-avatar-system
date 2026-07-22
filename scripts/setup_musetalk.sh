@@ -4,20 +4,18 @@
 set -e
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BACKEND_DIR="$PROJECT_ROOT/backend"
-MODELS_DIR="$BACKEND_DIR/models"
+MUSETALK_SERVICE_DIR="$PROJECT_ROOT/services/musetalk"
+MODELS_DIR="$MUSETALK_SERVICE_DIR/models"
 MUSETALK_DIR="$MODELS_DIR/MuseTalk"
-VENV_PYTHON="$BACKEND_DIR/venv/bin/python"
+# Host Python is only used to download weights; runtime deps live in the
+# musetalk Docker image (services/musetalk/Dockerfile).
+VENV_PYTHON="${MUSETALK_PYTHON:-python3}"
 SENTINEL="$PROJECT_ROOT/.musetalk_ready"
 
-if [ ! -f "$VENV_PYTHON" ]; then
-  VENV_PYTHON="python3"
-fi
-
-echo "=== MuseTalk V1.5 Setup ==="
-echo "Project : $PROJECT_ROOT"
-echo "Backend : $BACKEND_DIR"
-echo "Python  : $VENV_PYTHON"
+echo "=== MuseTalk V1.5 Setup (Docker-isolated service) ==="
+echo "Project  : $PROJECT_ROOT"
+echo "Models   : $MUSETALK_DIR"
+echo "Python   : $VENV_PYTHON (download helper only)"
 echo ""
 
 # ── 1. Clone MuseTalk ────────────────────────────────────────────────────────
@@ -30,30 +28,11 @@ else
   git clone https://github.com/TMElyralab/MuseTalk.git "$MUSETALK_DIR"
 fi
 
-# ── 2. Install Python dependencies ──────────────────────────────────────────
+# ── 2. Runtime deps note ─────────────────────────────────────────────────────
 echo ""
-echo "[2/5] Installing MuseTalk requirements..."
-
-# Install requirements, skipping packages incompatible with Python 3.12
-# (mmpose/mmcv have no 3.12 wheels; tensorflow is optional for our use case)
-"$VENV_PYTHON" -m pip install -q \
-  "diffusers==0.32.2" \
-  "accelerate==0.28.0" \
-  "transformers==4.39.2" \
-  "opencv-python==4.9.0.80" \
-  "soundfile==0.12.1" \
-  "librosa==0.11.0" \
-  "einops==0.8.1" \
-  "omegaconf" \
-  "pyyaml" \
-  "imageio" \
-  "imageio[ffmpeg]" \
-  "ffmpeg-python" \
-  "moviepy<2" \
-  "mediapipe" \
-  "face-alignment" \
-  "safetensors" \
-  "timm"
+echo "[2/5] Skipping host pip install — MuseTalk Python deps are isolated in"
+echo "      the services/musetalk Docker image. Installing download helpers only..."
+"$VENV_PYTHON" -m pip install -q "huggingface_hub" "gdown" || true
 
 # ── 3. Replace preprocessing.py with CPU-compatible version ─────────────────
 echo ""
@@ -150,12 +129,11 @@ echo "  preprocessing.py replaced ✓"
 # ── 3b. Install our custom persistent worker ────────────────────────────────
 # musetalk_worker.py is OUR driver (loads the models once and serves inference
 # jobs over stdin/stdout), not part of upstream MuseTalk — so the git clone
-# above doesn't include it. Copy the tracked copy from the backend into the
-# clone's scripts/ dir. The backend can also run it from its tracked location,
-# but copying keeps everything self-contained under the MuseTalk repo.
+# above doesn't include it. Copy the tracked copy from services/musetalk into
+# the clone's scripts/ dir (the HTTP service also runs the tracked copy directly).
 echo ""
 echo "[3b/5] Installing persistent MuseTalk worker (musetalk_worker.py)..."
-WORKER_SRC="$BACKEND_DIR/musetalk_worker.py"
+WORKER_SRC="$MUSETALK_SERVICE_DIR/musetalk_worker.py"
 WORKER_DST="$MUSETALK_DIR/scripts/musetalk_worker.py"
 if [ -f "$WORKER_SRC" ]; then
   cp "$WORKER_SRC" "$WORKER_DST"
@@ -299,7 +277,8 @@ if [ "$MISSING" -eq 0 ]; then
   echo "  Sentinel written: $SENTINEL"
   echo ""
   echo "=== MuseTalk setup complete! ==="
-  echo "Set AVATAR_ENGINE=musetalk in .env and restart the backend."
+  echo "Set AVATAR_ENGINE=musetalk in .env and restart the musetalk service:"
+  echo "  docker compose restart musetalk"
 else
   echo ""
   echo "Some checks failed — see above. Fix and re-run."

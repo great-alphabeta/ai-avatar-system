@@ -1,8 +1,6 @@
 # Production overrides for AWS GPU deployment.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
-version: '3.8'
-
 services:
   postgres:
     restart: always
@@ -22,12 +20,54 @@ services:
     restart: always
     env_file: .env.prod
     volumes:
-      # Production: no source-code bind-mount — use the built image
-      - avatar_cache:/tmp/avatars
-      - video_cache:/tmp/videos
-      - audio_cache:/tmp/audio
+      - media_data:/media
       - voice_profiles:/app/voice_profiles
-      - musetalk_models:/app/models  # persist downloaded models across restarts
+      - avatar_uploads:/app/uploads
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
+  stt:
+    restart: always
+    env_file: .env.prod
+    volumes:
+      - media_data:/media
+      - whisper_cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
+  tts:
+    restart: always
+    env_file: .env.prod
+    volumes:
+      - media_data:/media
+      - voice_profiles:/app/voice_profiles
+      - tts_cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "5" }
+
+  musetalk:
+    restart: always
+    env_file: .env.prod
+    volumes:
+      - media_data:/media
+      - musetalk_models:/app/models
     deploy:
       resources:
         reservations:
@@ -43,7 +83,6 @@ services:
     restart: always
     env_file: .env.prod
     volumes:
-      # Production: no source-code bind-mount — use the built image
       - /app/node_modules
       - /app/.next
     logging:
@@ -54,18 +93,9 @@ services:
     restart: always
     env_file: .env.prod
     volumes:
-      - avatar_cache:/tmp/avatars
-      - video_cache:/tmp/videos
-      - audio_cache:/tmp/audio
+      - media_data:/media
       - voice_profiles:/app/voice_profiles
-      - musetalk_models:/app/models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - avatar_uploads:/app/uploads
     logging:
       driver: json-file
       options: { max-size: "100m", max-file: "5" }
@@ -81,5 +111,11 @@ services:
       options: { max-size: "50m", max-file: "3" }
 
 volumes:
+  media_data:
+    driver: local
   musetalk_models:
+    driver: local
+  whisper_cache:
+    driver: local
+  tts_cache:
     driver: local

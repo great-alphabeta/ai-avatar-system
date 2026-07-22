@@ -1,17 +1,15 @@
 """
-Tests for the TTS fallback chain and LLM provider wiring.
+Tests for the TTS HTTP client and LLM provider wiring.
 
-The TTS degradation path matters for UX: when Chatterbox can't load (no GPU,
-missing model), users should get Microsoft Edge neural voices — not the
-robotic gTTS — and the result must be labelled so the UI can warn that voice
-cloning was dropped.
+Fallback (edge-tts → gTTS) runs inside the isolated TTS container; the API
+client surfaces the engine/fallback fields returned by that service.
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.services.tts import TTSService
+from app.services.tts import SynthResult, TTSService
 
 pytestmark = pytest.mark.asyncio
 
@@ -25,35 +23,62 @@ def test_legacy_coqui_provider_aliases_to_chatterbox(monkeypatch):
     assert service.provider == "chatterbox"
 
 
-async def test_tts_falls_back_to_edge_when_chatterbox_unavailable(monkeypatch, tmp_path):
+async def test_tts_client_maps_remote_synth_result(monkeypatch, tmp_path):
+    """HTTP client maps remote JSON into SynthResult (including fallback)."""
     service = TTSService()
     out = str(tmp_path / "out.wav")
 
-    monkeypatch.setattr(service, "initialize", AsyncMock(side_effect=RuntimeError("no chatterbox")))
-    monkeypatch.setattr(service, "_edge_fallback", AsyncMock(return_value=out))
-    gtts = AsyncMock()
-    monkeypatch.setattr(service, "_gtts_fallback", gtts)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "output_path": out,
+        "engine": "edge-tts",
+        "fallback": True,
+        "voice_cloned": False,
+    }
+    mock_resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.post = AsyncMock(return_value=mock_resp)
+
+    monkeypatch.setattr("app.services.tts.httpx.AsyncClient", lambda **kwargs: mock_client)
 
     result = await service.synthesize("Hello world", out, speaker_wav=None, language="en")
 
+    assert isinstance(result, SynthResult)
     assert result.engine == "edge-tts"
     assert result.fallback is True
     assert result.voice_cloned is False
-    gtts.assert_not_awaited()  # gTTS is last resort only
+    mock_client.post.assert_awaited()
 
 
-async def test_tts_falls_back_to_gtts_when_edge_also_fails(monkeypatch, tmp_path):
+async def test_tts_client_maps_chatterbox_success(monkeypatch, tmp_path):
     service = TTSService()
     out = str(tmp_path / "out.wav")
 
-    monkeypatch.setattr(service, "initialize", AsyncMock(side_effect=RuntimeError("no chatterbox")))
-    monkeypatch.setattr(service, "_edge_fallback", AsyncMock(side_effect=RuntimeError("edge down")))
-    monkeypatch.setattr(service, "_gtts_fallback", AsyncMock(return_value=out))
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "output_path": out,
+        "engine": "chatterbox",
+        "fallback": False,
+        "voice_cloned": True,
+    }
+    mock_resp.raise_for_status = MagicMock()
 
-    result = await service.synthesize("Hello world", out, speaker_wav=None, language="en")
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.post = AsyncMock(return_value=mock_resp)
 
-    assert result.engine == "gtts"
-    assert result.fallback is True
+    monkeypatch.setattr("app.services.tts.httpx.AsyncClient", lambda **kwargs: mock_client)
+
+    result = await service.synthesize("Hi", out, speaker_wav="/media/voice.wav", language="en")
+    assert result.engine == "chatterbox"
+    assert result.fallback is False
+    assert result.voice_cloned is True
 
 
 def test_llm_ollama_provider_uses_openai_compatible_client(monkeypatch):

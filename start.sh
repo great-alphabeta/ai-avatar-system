@@ -161,6 +161,7 @@ fi
 # Check MuseTalk lip-sync setup
 _musetalk_ready() {
   [[ -f ".musetalk_ready" ]] && return 0
+  [[ -f "services/musetalk/models/MuseTalk/models/musetalkV15/unet.pth" ]] && return 0
   [[ -f "backend/models/MuseTalk/models/musetalkV15/unet.pth" ]] && return 0
   return 1
 }

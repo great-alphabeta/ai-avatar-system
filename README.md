@@ -99,31 +99,24 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
 
 ## 🏗️ Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        Browser / Client                       │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐ │
-│  │Avatar Studio│  │ Voice Studio │  │   Chat Interface     │ │
-│  │  (upload)   │  │  (cloning)   │  │ Idle anim + chunks   │ │
-│  └──────┬──────┘  └──────┬───────┘  └──────────┬───────────┘ │
-└─────────┼───────────────┼─────────────────────┼─────────────┘
-          │ REST           │ REST                │ WebSocket
-          ▼                ▼                     ▼
-┌──────────────────────────────────────────────────────────────┐
-│                       FastAPI Backend                         │
-│  ┌──────────────────────────────────────────────────────┐    │
-│  │                  WebSocket Manager                    │    │
-│  │  split sentences → TTS → MuseTalk → stream chunks    │    │
-│  └──────────────────────────────────────────────────────┘    │
-│  ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌───────────────┐  │
-│  │  Whisper │ │Claude/GPT │ │ XTTS v2  │ │  MuseTalk     │  │
-│  │   STT    │ │  / Llama  │ │   TTS    │ │  (GPU/CPU)    │  │
-│  └──────────┘ └───────────┘ └──────────┘ └───────────────┘  │
-│  ┌──────────┐ ┌──────────┐  ┌──────────┐ ┌───────────────┐  │
-│  │PostgreSQL│ │  Redis   │  │  Celery  │ │ Local FS / S3 │  │
-│  └──────────┘ └──────────┘  └──────────┘ └───────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-```
+`
+Browser / Client
+  REST / WebSocket
+        |
+        v
+Thin FastAPI API (no ML weights)
+  Auth · Sessions · LLM HTTP · WebSocket orchestrator
+        |              |                |
+        v              v                v
+   stt:8001       tts:8002        musetalk:8003
+   Whisper        Chatterbox      MuseTalk V1.5
+   own Python     own Python      own Python
+        \_____________|________________/
+                 shared /media volume
+  PostgreSQL · Redis · Celery · Local FS / S3
+`
+
+Each AI model runs in its **own Docker container with an isolated Python environment**, so Whisper / Chatterbox / MuseTalk dependencies never conflict and GPU VRAM can be managed per service.
 
 ### Real-Time Data Flow (one conversation turn)
 
@@ -139,9 +132,9 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
         ▼
   Split into sentences ────────► ["Hello!", "How are you?", ...]
         │
-        ├── sentence 1 → XTTS → MuseTalk → video_chunk WS → browser plays
-        ├── sentence 2 → XTTS → MuseTalk → video_chunk WS → queued
-        └── sentence N → XTTS → MuseTalk → video_chunk WS → queued
+        ├── sentence 1 → Chatterbox → MuseTalk → video_chunk WS → browser plays
+        ├── sentence 2 → Chatterbox → MuseTalk → video_chunk WS → queued
+        └── sentence N → Chatterbox → MuseTalk → video_chunk WS → queued
 ```
 
 ---
@@ -150,37 +143,31 @@ AvatarAI is an open-source, production-ready platform for building **photorealis
 
 ```
 ai-avatar-system/
-├── backend/                    # FastAPI application
+├── backend/                    # Thin FastAPI API (no ML model weights)
 │   ├── app/
 │   │   ├── api/v1/             # REST endpoints (users, avatars, sessions, messages)
-│   │   ├── services/           # Core services (LLM, TTS, STT, animator, storage)
+│   │   ├── services/           # HTTP clients to STT/TTS/MuseTalk + LLM/storage
 │   │   ├── models/             # SQLAlchemy DB models
 │   │   └── websocket.py        # Real-time WebSocket handler + sentence streaming
 │   ├── alembic/                # Database migrations
-│   ├── models/MuseTalk/        # MuseTalk V1.5 (lip-sync engine)
-│   │   └── scripts/
-│   │       └── musetalk_worker.py  # Persistent worker (models loaded once)
 │   ├── tests/                  # pytest suite
-│   ├── Dockerfile              # CUDA 11.8 base image
-│   └── requirements.txt
+│   ├── Dockerfile              # Slim Python image (no CUDA)
+│   └── requirements.txt        # API deps only
+├── services/                   # Isolated AI model containers (own Python envs)
+│   ├── stt/                    # Whisper (faster-whisper) — port 8001
+│   ├── tts/                    # Chatterbox + edge-tts/gTTS fallback — port 8002
+│   └── musetalk/               # MuseTalk V1.5 persistent worker — port 8003
+│       ├── musetalk_worker.py
+│       └── models/             # Downloaded by scripts/setup_musetalk.sh
 ├── frontend/                   # Next.js 14 application
-│   ├── app/                    # App Router pages
-│   ├── components/             # React components (ChatInterface, IdleAvatar, etc.)
-│   ├── lib/api.ts              # Axios API client
-│   └── store/                  # Zustand global state
 ├── nginx/
-│   └── nginx.conf              # Reverse proxy (HTTP → backend/frontend, WebSocket)
 ├── infrastructure/
-│   ├── main.tf                 # AWS Terraform (ECS, RDS, ElastiCache, S3, CloudFront)
-│   └── variables.tf
 ├── scripts/
-│   ├── setup_musetalk.sh       # Download MuseTalk models (~9 GB)
-│   └── deploy-aws.sh           # One-command EC2 GPU deployment
-├── docker-compose.yml          # Development (CPU) — all services
-├── docker-compose.prod.yml     # Production overrides (GPU, no bind mounts, logging)
-├── deploy.sh                   # ECR push + Terraform deploy (ECS path)
-├── .env.example                # Development env template
-└── .env.prod.example           # Production env template
+│   ├── setup_musetalk.sh       # Download MuseTalk models (~9 GB) into services/musetalk/models
+│   └── deploy-aws.sh
+├── docker-compose.yml          # Dev: API + STT + TTS + MuseTalk + infra
+├── docker-compose.prod.yml     # Production overrides (GPU on ML services only)
+└── .env.example
 ```
 
 ---
@@ -201,32 +188,49 @@ cp .env.example .env          # add your ANTHROPIC_API_KEY (or OPENAI_API_KEY)
 docker compose up -d
 ```
 
+This starts the thin API plus **isolated** `stt`, `tts`, and `musetalk` containers (each with its own Python/CUDA env) sharing a `/media` volume for audio/video paths.
+
 | Service | URL |
 |---|---|
-| 🖥️ Frontend | http://localhost:3000 |
-| ⚙️ Backend API | http://localhost:8000 |
-| 📖 Swagger Docs | http://localhost:8000/docs |
-| 🌸 Celery Flower | http://localhost:5555 |
+| Frontend | http://localhost:3000 |
+| Backend API | http://localhost:8000 |
+| Swagger Docs | http://localhost:8000/docs |
+| Celery Flower | http://localhost:5555 |
+| STT (internal) | http://stt:8001/health |
+| TTS (internal) | http://tts:8002/health |
+| MuseTalk (internal) | http://musetalk:8003/health |
 
-> **No AWS required.** Set `USE_LOCAL_STORAGE=true` (default) — uploads saved to `backend/uploads/`.
+> **No AWS required.** Set `USE_LOCAL_STORAGE=true` (default) — uploads saved under the API container.
+
+**Local LLM via Ollama (optional profile):**
+
+```bash
+docker compose --profile ollama up -d
+# then in .env: LLM_PROVIDER=ollama  OPENAI_BASE_URL=http://ollama:11434/v1
+```
 
 **Want something to talk to immediately?** Seed three ready-made demo avatars (AI-generated faces + personalities):
 
 ```bash
-backend/venv/bin/python scripts/seed_demo.py            # or any python with `requests`
-backend/venv/bin/python scripts/seed_demo.py --with-voices   # + cloned demo voices
+python scripts/seed_demo.py            # or any python with `requests`
+python scripts/seed_demo.py --with-voices   # + cloned demo voices
 ```
 
 Prebuilt images are also published on every release — `ghcr.io/punithvt/ai-avatar-system-backend` and `…-frontend`.
 
-### Option B — Manual (development)
+### Option B — Manual API only (ML still via Docker)
 
 ```bash
-# Backend
+# Start isolated ML services + infra
+docker compose up -d postgres redis stt tts musetalk
+
+# Thin API on the host
 cd backend
-python -m venv venv && source venv/bin/activate
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp ../.env.example ../.env
+# Point ML URLs at published ports if you expose them, or use host.docker.internal
+# defaults assume Docker network: http://stt:8001 etc.
 alembic upgrade head
 uvicorn main:app --reload --port 8000
 
@@ -239,14 +243,14 @@ npm run dev
 ### Option C — Enable MuseTalk Lip-Sync
 
 ```bash
-# Download models (~9 GB, one-time)
+# Download models into services/musetalk/models (~9 GB, one-time)
 bash scripts/setup_musetalk.sh
 
 # Set in .env
 AVATAR_ENGINE=musetalk
 
-# Restart
-docker compose restart backend
+# Restart only the musetalk container
+docker compose restart musetalk
 ```
 
 ---
@@ -292,31 +296,25 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 **What `docker-compose.prod.yml` adds over development:**
-- GPU reservation (`nvidia` driver, count=1) for backend + celery-worker
-- `float16` inference enabled automatically on CUDA → ~2× speedup
-- Persistent `musetalk_models` volume (survive container restarts)
-- No source-code bind mounts (runs from built image)
+- GPU reservation (`nvidia` driver) for **stt / tts / musetalk only** (API stays CPU)
+- Persistent model/cache volumes on ML services
+- No source-code bind mounts on the API (runs from built image)
 - Log rotation (100 MB max, 5 files)
 - Flower disabled (security)
 
 ### Verify GPU is Working
 
 ```bash
-# Check GPU is visible in container
-docker exec avatar-backend python -c "
+# Check GPU inside an ML container (e.g. musetalk)
+docker exec avatar-musetalk python -c "
 import torch
 print('CUDA:', torch.cuda.is_available())
-print('GPU:', torch.cuda.get_device_name(0))
-print('VRAM:', round(torch.cuda.get_device_properties(0).total_memory/1024**3,1), 'GB')
+print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'n/a')
 "
 
-# Expected on g5.xlarge:
-# CUDA: True
-# GPU: NVIDIA A10G
-# VRAM: 24.0 GB
-
-# Live GPU utilisation
-docker exec avatar-backend nvidia-smi
+docker exec avatar-stt curl -fsS http://localhost:8001/health
+docker exec avatar-tts curl -fsS http://localhost:8002/health
+docker exec avatar-musetalk curl -fsS http://localhost:8003/health
 ```
 
 ### AWS Terraform (ECS Path)
@@ -424,9 +422,13 @@ OPENAI_BASE_URL=                  # e.g. http://localhost:11434/v1 for Ollama / 
 
 # Avatar engine
 AVATAR_ENGINE=musetalk            # musetalk (GPU recommended) | simple (CPU fallback)
-MUSETALK_PATH=models/MuseTalk
 
-# TTS — automatic fallback chain: chatterbox → edge-tts → gtts
+# Isolated ML services (Docker Compose defaults)
+STT_URL=http://stt:8001
+TTS_URL=http://tts:8002
+MUSETALK_URL=http://musetalk:8003
+
+# TTS — automatic fallback chain inside the tts container: chatterbox → edge-tts → gtts
 TTS_PROVIDER=chatterbox
 
 # STT
@@ -532,13 +534,13 @@ Run `python scripts/seed_demo.py` — it creates three demo avatars (AI-generate
 <details>
 <summary><strong>How do I get MuseTalk models?</strong></summary>
 
-Run `bash scripts/setup_musetalk.sh` — downloads ~9 GB of models automatically.
+Run `bash scripts/setup_musetalk.sh` — downloads ~9 GB into `services/musetalk/models/`, then `docker compose restart musetalk`.
 </details>
 
 <details>
 <summary><strong>Why does the first response take longer?</strong></summary>
 
-The MuseTalk persistent worker loads all models into GPU VRAM on the first request (~60 s on GPU, ~5 min on CPU). Subsequent requests reuse the loaded models.
+The MuseTalk container's persistent worker loads all models into GPU VRAM on the first animate request (~60 s on GPU, ~5 min on CPU). Subsequent requests reuse the loaded models. Whisper and Chatterbox similarly warm on first use inside their own containers.
 </details>
 
 <details>

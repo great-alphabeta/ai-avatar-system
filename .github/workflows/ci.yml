@@ -24,6 +24,9 @@ jobs:
           filters: |
             backend:
               - 'backend/**'
+              - 'services/**'
+              - 'docker-compose.yml'
+              - 'docker-compose.prod.yml'
               - '.github/workflows/ci.yml'
             frontend:
               - 'frontend/**'

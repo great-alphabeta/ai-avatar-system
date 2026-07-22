@@ -55,8 +55,8 @@ if ! alembic upgrade head; then
 fi
 echo "[startup] Migrations applied successfully."
 
-# Ensure runtime directories exist
-mkdir -p voice_profiles /tmp/avatars /tmp/videos /tmp/audio
+# Ensure runtime directories exist (TMPDIR=/media in Docker for shared ML media)
+mkdir -p voice_profiles /tmp/avatars /tmp/videos /tmp/audio "${TMPDIR:-/tmp}" /media
 
 echo "[startup] Starting uvicorn..."
 exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-4}"
