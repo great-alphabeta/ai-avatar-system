@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     python3.10 \
     python3.10-dev \
     python3-pip \
+    build-essential \
     ffmpeg \
     libsndfile1 \
     curl \
@@ -16,11 +17,20 @@ RUN apt-get update && apt-get install -y \
     && ln -sf pip3 /usr/bin/pip
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+
+# Install order matters for chatterbox-tts:
+# 1) numpy first (native deps / build isolation)
+# 2) CUDA torch==2.6.0 to match chatterbox (avoid CPU wheels + version fights)
+# 3) runtime deps from requirements.txt (intentionally omits Gradio)
+# 4) chatterbox-tts --no-deps so it does not pull Gradio/pkuseg/CPU torch
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir "numpy>=1.24.0,<1.26.0" \
     && pip install --no-cache-dir \
-        torch==2.2.0+cu118 \
-        torchaudio==2.2.0+cu118 \
-        --index-url https://download.pytorch.org/whl/cu118
+        torch==2.6.0+cu118 \
+        torchaudio==2.6.0+cu118 \
+        --index-url https://download.pytorch.org/whl/cu118 \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --no-deps chatterbox-tts==0.1.6
 
 COPY app ./app
 
