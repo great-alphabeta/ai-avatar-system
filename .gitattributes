@@ -1,0 +1,4 @@
+# Keep shell scripts LF so Linux containers don't fail with `bash\r`
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+**/entrypoint.sh text eol=lf

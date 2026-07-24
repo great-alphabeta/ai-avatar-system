@@ -26,9 +26,9 @@ _load_lock: Optional[asyncio.Lock] = None
 
 def _cuda_available() -> bool:
     try:
-        import torch
+        import ctranslate2
 
-        return torch.cuda.is_available()
+        return ctranslate2.get_cuda_device_count() > 0
     except Exception:
         return False
 

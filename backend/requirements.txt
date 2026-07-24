@@ -32,10 +32,11 @@ python-socketio==5.11.0
 anthropic>=0.45.0
 openai>=1.50.0
 
-# Light image processing for avatar upload preprocessing (no torch)
+# Light image/audio processing for avatar upload & voice profiles (no torch)
 numpy==1.26.3
 opencv-python-headless==4.9.0.80
 Pillow==10.2.0
+soundfile==0.12.1
 
 # Celery
 celery==5.3.6

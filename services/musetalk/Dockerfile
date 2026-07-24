@@ -1,12 +1,16 @@
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+# Official image ships CUDA torch already — avoids Docker Desktop segfault/OOM
+# while pip unpacks multi-GB nvidia-* wheels (exit 139 / Bad CRC-32).
+FROM pytorch/pytorch:2.2.0-cuda11.8-cudnn8-runtime
+
+# Bundled conda pip is broken on these images; use uv instead.
+COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV UV_SYSTEM_PYTHON=1
+ENV UV_NO_CACHE=1
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3.10-dev \
-    python3-pip \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsm6 \
     libxext6 \
@@ -15,18 +19,15 @@ RUN apt-get update && apt-get install -y \
     libsndfile1 \
     git \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf python3.10 /usr/bin/python3 \
-    && ln -sf python3 /usr/bin/python \
-    && ln -sf pip3 /usr/bin/pip
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir \
-        torch==2.2.0+cu118 \
-        torchvision==0.17.0+cu118 \
-        torchaudio==2.2.0+cu118 \
-        --index-url https://download.pytorch.org/whl/cu118
+
+# torch is preinstalled; add matching vision/audio wheels without re-pulling CUDA deps.
+RUN uv pip install --no-deps \
+        "https://download.pytorch.org/whl/cu118/torchvision-0.17.0%2Bcu118-cp310-cp310-linux_x86_64.whl" \
+        "https://download.pytorch.org/whl/cu118/torchaudio-2.2.0%2Bcu118-cp310-cp310-linux_x86_64.whl" \
+    && uv pip install -r requirements.txt
 
 COPY musetalk_worker.py .
 COPY app ./app

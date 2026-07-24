@@ -35,7 +35,7 @@ docker compose up -d --build
 | Frontend | http://localhost:3000 |
 | Backend API | http://localhost:8000 |
 | API docs | http://localhost:8000/docs |
-| Flower | http://localhost:5555 |
+| Flower | http://localhost:5556 |
 
 Health (includes remote ML reachability):
 

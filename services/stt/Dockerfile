@@ -16,10 +16,11 @@ RUN apt-get update && apt-get install -y \
     && ln -sf pip3 /usr/bin/pip
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir \
-        torch==2.2.0+cu118 \
-        --index-url https://download.pytorch.org/whl/cu118
+
+# faster-whisper uses CTranslate2 (not PyTorch). Skip torch to avoid
+# multi-GB nvidia-* wheels that frequently corrupt mid-download (Bad CRC-32).
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 

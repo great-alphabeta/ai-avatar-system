@@ -86,7 +86,7 @@ if [[ "$MODE" == "status" ]]; then
     "Frontend      http://localhost:3000" \
     "Backend API   http://localhost:8000/health" \
     "Swagger Docs  http://localhost:8000/docs" \
-    "Celery Flower http://localhost:5555" \
+    "Celery Flower http://localhost:5556" \
     "Prometheus    http://localhost:9090"
   do
     name=$(echo "$url" | awk '{print $1}')
@@ -270,7 +270,7 @@ if [[ "$MODE" == "docker" ]]; then
   echo -e "  ${GREEN}►${RESET} Frontend     →  ${CYAN}http://localhost:3000${RESET}"
   echo -e "  ${GREEN}►${RESET} Backend API  →  ${CYAN}http://localhost:8000${RESET}"
   echo -e "  ${GREEN}►${RESET} Swagger Docs →  ${CYAN}http://localhost:8000/docs${RESET}"
-  echo -e "  ${GREEN}►${RESET} Celery Flower→  ${CYAN}http://localhost:5555${RESET}"
+  echo -e "  ${GREEN}►${RESET} Celery Flower→  ${CYAN}http://localhost:5556${RESET}"
   echo -e "  ${GREEN}►${RESET} Prometheus   →  ${CYAN}http://localhost:9090${RESET}"
   echo ""
   echo -e "  ${BOLD}Useful commands${RESET}"

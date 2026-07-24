@@ -1,6 +1,11 @@
 FROM python:3.10-slim-bookworm
 
+# uv avoids pip segfaults (exit 139) when unpacking wheels under Docker Desktop memory pressure.
+COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
+
 ENV DEBIAN_FRONTEND=noninteractive
+ENV UV_SYSTEM_PYTHON=1
+ENV UV_NO_CACHE=1
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -8,11 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libgl1 \
+    libsndfile1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv pip install -r requirements.txt
 
 COPY . .
 

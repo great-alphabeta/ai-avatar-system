@@ -195,7 +195,7 @@ This starts the thin API plus **isolated** `stt`, `tts`, and `musetalk` containe
 | Frontend | http://localhost:3000 |
 | Backend API | http://localhost:8000 |
 | Swagger Docs | http://localhost:8000/docs |
-| Celery Flower | http://localhost:5555 |
+| Celery Flower | http://localhost:5556 |
 | STT (internal) | http://stt:8001/health |
 | TTS (internal) | http://tts:8002/health |
 | MuseTalk (internal) | http://musetalk:8003/health |
