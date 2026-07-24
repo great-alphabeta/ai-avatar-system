@@ -127,13 +127,18 @@ def _run_job(job, vae, unet, pe, audio_processor, whisper, fp, timesteps, device
         cv2.imwrite(f"{frames_dir}/{str(i).zfill(8)}.png", combined)
 
     # ── assemble video ───────────────────────────────────────────────────────
+    # Prefer apt ffmpeg (/usr/bin) — conda’s ffmpeg lacks libx264/crf.
+    ffmpeg = "/usr/bin/ffmpeg" if os.path.isfile("/usr/bin/ffmpeg") else "ffmpeg"
     tmp_vid = output_path + ".tmp.mp4"
-    os.system(f"ffmpeg -y -v warning -r {FPS} -f image2 "
-              f"-i {frames_dir}/%08d.png "
-              f"-vcodec libx264 -vf format=yuv420p -crf 18 {tmp_vid}")
-    os.system(f"ffmpeg -y -v warning -i {audio_path} -i {tmp_vid} {output_path}")
+    os.system(
+        f"{ffmpeg} -y -v warning -r {FPS} -f image2 "
+        f"-i {frames_dir}/%08d.png "
+        f"-vcodec libx264 -vf format=yuv420p -crf 18 {tmp_vid}"
+    )
+    os.system(f"{ffmpeg} -y -v warning -i {audio_path} -i {tmp_vid} -c:v copy -c:a aac {output_path}")
     shutil.rmtree(frames_dir)
-    os.remove(tmp_vid)
+    if os.path.isfile(tmp_vid):
+        os.remove(tmp_vid)
 
 
 def main():

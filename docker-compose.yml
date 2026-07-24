@@ -11,7 +11,7 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-avatar_user}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-avatar_user} -d ${DATABASE_NAME:-avatar_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -115,7 +115,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - media_data:/media
-      - whisper_cache:/root/.cache
+      # Host bind so Whisper weights are visible/editable on disk
+      - ./services/stt/models:/root/.cache
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
       interval: 20s
@@ -146,7 +147,8 @@ services:
     volumes:
       - media_data:/media
       - voice_profiles:/app/voice_profiles
-      - tts_cache:/root/.cache
+      # Host bind so Chatterbox weights are visible/editable on disk
+      - ./services/tts/models:/root/.cache
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
       interval: 20s
@@ -180,6 +182,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - media_data:/media
+      # Avatar images live on this volume in the API (/app/uploads/avatars/...)
+      - avatar_uploads:/app/uploads
       # Host bind for easy setup via scripts/setup_musetalk.sh
       - ./services/musetalk/models:/app/models
     healthcheck:
@@ -317,11 +321,10 @@ services:
       - avatar-network
     restart: unless-stopped
 
-  # Optional local LLM — enable with: docker compose --profile ollama up -d
+  # Local LLM (Ollama) — starts with the default stack
   ollama:
     image: ollama/ollama:latest
     container_name: avatar-ollama
-    profiles: ["ollama"]
     ports:
       - "11434:11434"
     volumes:
@@ -375,12 +378,9 @@ volumes:
     driver: local
   avatar_uploads:
     driver: local
-  musetalk_models:
-    driver: local
-  whisper_cache:
-    driver: local
-  tts_cache:
-    driver: local
+  # musetalk / stt / tts model caches are host bind mounts in this file
+  # (see ./services/{musetalk,stt,tts}/models). Named volumes remain in
+  # docker-compose.prod.yml for production.
   ollama_data:
     driver: local
 

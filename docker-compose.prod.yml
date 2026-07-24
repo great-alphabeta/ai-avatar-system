@@ -67,6 +67,7 @@ services:
     env_file: .env.prod
     volumes:
       - media_data:/media
+      - avatar_uploads:/app/uploads
       - musetalk_models:/app/models
     deploy:
       resources:

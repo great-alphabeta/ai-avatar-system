@@ -202,10 +202,10 @@ This starts the thin API plus **isolated** `stt`, `tts`, and `musetalk` containe
 
 > **No AWS required.** Set `USE_LOCAL_STORAGE=true` (default) — uploads saved under the API container.
 
-**Local LLM via Ollama (optional profile):**
+**Local LLM via Ollama (included in default stack):**
 
 ```bash
-docker compose --profile ollama up -d
+docker compose up -d
 # then in .env: LLM_PROVIDER=ollama  OPENAI_BASE_URL=http://ollama:11434/v1
 ```
 

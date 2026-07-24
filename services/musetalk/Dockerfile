@@ -37,6 +37,8 @@ RUN mkdir -p /media /app/models
 ENV TMPDIR=/media
 ENV MUSETALK_PATH=/app/models/MuseTalk
 ENV PYTHONPATH=/app/models/MuseTalk
+# Prefer apt ffmpeg (libx264) over the limited conda binary
+ENV PATH="/usr/bin:/bin:${PATH}"
 EXPOSE 8003
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \

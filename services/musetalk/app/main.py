@@ -99,12 +99,14 @@ async def _ensure_worker() -> asyncio.subprocess.Process:
 
     use_float16 = _cuda
     logger.info("Starting persistent MuseTalk worker…")
+    # Don't PIPE stderr — worker progress/warnings can fill the OS pipe
+    # buffer and deadlock while we wait on stdout for READY.
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         str(WORKER_SCRIPT),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=None,
         cwd=str(MUSETALK_PATH),
         env=env,
     )
@@ -125,19 +127,38 @@ async def _ensure_worker() -> asyncio.subprocess.Process:
     proc.stdin.write(init_msg.encode())
     await proc.stdin.drain()
 
-    timeout = 120 if _cuda else 600
-    try:
-        ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError("MuseTalk worker timed out while loading models")
+    timeout = 300 if _cuda else 600
+    deadline = asyncio.get_event_loop().time() + timeout
+    ready = False
+    while True:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            proc.kill()
+            raise RuntimeError("MuseTalk worker timed out while loading models")
+        try:
+            ready_line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise RuntimeError("MuseTalk worker timed out while loading models")
 
-    if not ready_line.decode().strip().startswith("READY"):
-        stderr_out = await proc.stderr.read() if proc.stderr else b""
+        if proc.returncode is not None and not ready_line:
+            raise RuntimeError(
+                f"Worker exited during startup (code={proc.returncode})"
+            )
+        if not ready_line:
+            raise RuntimeError("Worker closed stdout before READY")
+
+        line = ready_line.decode(errors="replace").strip()
+        if line.startswith("READY"):
+            ready = True
+            break
+        # MuseTalk's load_all_model prints progress to stdout — ignore until READY
+        if line:
+            logger.info("worker: %s", line)
+
+    if not ready:
         proc.kill()
-        raise RuntimeError(
-            f"Worker failed to start. stderr:\n{stderr_out.decode(errors='replace')}"
-        )
+        raise RuntimeError("Worker failed to become READY")
 
     logger.info("MuseTalk worker ready")
     _worker_proc = proc
@@ -172,20 +193,42 @@ async def _worker_infer(
             _worker_proc = None
             raise RuntimeError(f"MuseTalk worker pipe is dead: {e}") from e
 
-        infer_timeout = 60 if _cuda else 300
-        try:
-            result_line = await asyncio.wait_for(proc.stdout.readline(), timeout=infer_timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            _worker_proc = None
-            raise RuntimeError(f"MuseTalk inference timed out after {infer_timeout}s")
+        infer_timeout = 180 if _cuda else 300
+        deadline = asyncio.get_event_loop().time() + infer_timeout
+        result = None
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                proc.kill()
+                _worker_proc = None
+                raise RuntimeError(f"MuseTalk inference timed out after {infer_timeout}s")
+            try:
+                result_line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+            except asyncio.TimeoutError:
+                proc.kill()
+                _worker_proc = None
+                raise RuntimeError(f"MuseTalk inference timed out after {infer_timeout}s")
 
-        if not result_line:
-            proc.kill()
-            _worker_proc = None
-            raise RuntimeError("MuseTalk worker exited before returning a result")
+            if not result_line:
+                proc.kill()
+                _worker_proc = None
+                raise RuntimeError("MuseTalk worker exited before returning a result")
 
-        result = json.loads(result_line.decode().strip())
+            line = result_line.decode(errors="replace").strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                logger.info("worker: %s", line)
+                continue
+            if isinstance(parsed, dict) and "status" in parsed:
+                result = parsed
+                break
+            logger.info("worker: %s", line)
+
+        if result is None:
+            raise RuntimeError("MuseTalk worker returned no result")
         if result["status"] != "ok":
             raise RuntimeError(result.get("msg", "Unknown worker error"))
         return output_path
@@ -193,8 +236,9 @@ async def _worker_infer(
 
 async def _animate_simple(image_path: str, audio_path: str, output_path: str) -> str:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = "/usr/bin/ffmpeg" if Path("/usr/bin/ffmpeg").is_file() else "ffmpeg"
     cmd = [
-        "ffmpeg",
+        ffmpeg,
         "-y",
         "-loop",
         "1",
@@ -204,8 +248,6 @@ async def _animate_simple(image_path: str, audio_path: str, output_path: str) ->
         str(audio_path),
         "-c:v",
         "libx264",
-        "-tune",
-        "stillimage",
         "-c:a",
         "aac",
         "-b:a",

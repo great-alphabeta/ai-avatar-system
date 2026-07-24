@@ -121,8 +121,6 @@ class AvatarAnimator:
             str(audio_path),
             "-c:v",
             "libx264",
-            "-tune",
-            "stillimage",
             "-c:a",
             "aac",
             "-b:a",

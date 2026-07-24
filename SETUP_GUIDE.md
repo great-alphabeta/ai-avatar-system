@@ -63,10 +63,10 @@ LLM_MODEL=claude-sonnet-4-6
 ANTHROPIC_API_KEY=...
 ```
 
-Local Ollama (compose profile):
+Local Ollama (included in the default stack):
 
 ```bash
-docker compose --profile ollama up -d
+docker compose up -d
 ```
 
 ```env
